@@ -1,20 +1,26 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Images, LogOut, History, WandSparkles, UserRound, Sparkles } from '@lucide/vue'
+import { Images, LogOut, History, WandSparkles, UserRound, Sparkles, ShieldCheck } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
 import AuthDialog from '../components/AuthDialog.vue'
 import { useAuthStore } from '../stores/auth'
+import { supabaseConfigured } from '../lib/supabase'
 
 const route = useRoute()
 const auth = useAuthStore()
 const authOpen = ref(false)
 const pageTitle = computed(() => String(route.meta.title || '创作工作台'))
+const breadcrumbGroup = computed(() => route.path.startsWith('/admin') ? '管理中心' : '创作空间')
 const navItems = [
   { label: '创作工作台', to: '/studio', icon: WandSparkles },
   { label: '我的素材', to: '/assets', icon: Images },
   { label: '生成记录', to: '/history', icon: History },
 ]
+const visibleNavItems = computed(() => [
+  ...navItems,
+  ...(!supabaseConfigured || auth.user?.app_metadata?.role === 'admin' ? [{ label: '管理后台', to: '/admin', icon: ShieldCheck }] : []),
+])
 const initial = computed(() => auth.user?.email?.slice(0, 1).toUpperCase() || '汪')
 
 async function signOut() {
@@ -35,9 +41,9 @@ async function signOut() {
         <span class="brand-name">极汪<span class="brand-dot">.</span><small>JIWANG STUDIO</small></span>
       </RouterLink>
 
-      <div class="side-label">创作空间</div>
+      <div class="side-label">工作台导航</div>
       <nav class="primary-nav" aria-label="主导航">
-        <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="nav-link" :class="{ active: route.path === item.to }">
+        <RouterLink v-for="item in visibleNavItems" :key="item.to" :to="item.to" class="nav-link" :class="{ active: route.path === item.to }">
           <component :is="item.icon" :size="18" :stroke-width="1.8" />
           <span>{{ item.label }}</span>
           <span v-if="item.to === '/studio'" class="nav-indicator"></span>
@@ -59,13 +65,13 @@ async function signOut() {
           </el-dropdown>
         </div>
         <button v-else class="sidebar-login" @click="authOpen = true"><div class="avatar small-avatar"><UserRound :size="17" /></div><span>邮箱登录 / 注册</span><span class="side-arrow">↗</span></button>
-        <div class="sidebar-footnote">极汪工作台 <span>v0.1</span></div>
+        <div class="sidebar-footnote">极汪工作台 <span>v0.2</span></div>
       </div>
     </aside>
 
     <div class="main-column">
       <header class="topbar">
-        <div class="breadcrumb"><span>创作空间</span><span class="breadcrumb-slash">/</span><strong>{{ pageTitle }}</strong></div>
+        <div class="breadcrumb"><span>{{ breadcrumbGroup }}</span><span class="breadcrumb-slash">/</span><strong>{{ pageTitle }}</strong></div>
         <div class="topbar-actions">
           <span class="topbar-mode"><span class="live-dot"></span>原型模式</span>
           <button v-if="auth.isSignedIn" class="header-user" @click="signOut"><span class="avatar">{{ initial }}</span><span class="header-user-label">{{ auth.user?.email }}</span><LogOut :size="16" /></button>
@@ -73,7 +79,7 @@ async function signOut() {
         </div>
       </header>
       <nav class="mobile-nav" aria-label="移动端主导航">
-        <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" :class="{ active: route.path === item.to }"><component :is="item.icon" :size="17" /><span>{{ item.label }}</span></RouterLink>
+        <RouterLink v-for="item in visibleNavItems" :key="item.to" :to="item.to" :class="{ active: route.path === item.to }"><component :is="item.icon" :size="17" /><span>{{ item.label }}</span></RouterLink>
       </nav>
       <main class="page-content"><RouterView /></main>
     </div>

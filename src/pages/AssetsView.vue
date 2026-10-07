@@ -61,7 +61,7 @@ watch(() => auth.user?.id, () => { void load() })
     </div>
     <el-alert class="subtle-alert" type="info" :closable="false" show-icon>{{ sourceLabel }} · 尚未接入真实模型；图片只在此浏览器或你自己的 Supabase 私有空间保存。</el-alert>
     <div class="assets-toolbar"><div class="asset-count"><strong>{{ assets.length }}</strong>张贴图 <span>· {{ sourceLabel }}</span></div><span v-if="assets.length" class="asset-sort">最近生成优先</span></div>
-    <div v-if="loading" class="empty-state"><div class="empty-state-inner"><LoaderCircle class="spin" :size="28" color="#719073" /><p>正在加载素材…</p></div></div>
+    <div v-if="loading" class="empty-state"><div class="empty-state-inner"><LoaderCircle class="spin" :size="28" color="#3977d4" /><p>正在加载素材…</p></div></div>
     <div v-else-if="assets.length" class="asset-grid">
       <article v-for="asset in assets" :key="asset.id" class="asset-card">
         <div class="asset-image-wrap"><img :src="asset.imageUrl" :alt="asset.name" loading="lazy" /><span class="asset-number">{{ String((asset.cellIndex ?? 0) + 1).padStart(2, '0') }} / 16</span></div>

@@ -36,7 +36,7 @@ watch(() => auth.user?.id, () => { void load() })
     </div>
     <el-alert class="subtle-alert" type="info" :closable="false" show-icon>{{ sourceLabel }} · 任务由本地 Mock 提供器完成，不会调用真实模型或扣除汪币。</el-alert>
     <div class="assets-toolbar"><div class="asset-count"><strong>{{ jobs.length }}</strong>条任务 <span>· 已完成 {{ completedCount }} 条</span></div></div>
-    <div v-if="loading" class="empty-state"><div class="empty-state-inner"><LoaderCircle class="spin" :size="28" color="#719073" /><p>正在加载任务…</p></div></div>
+    <div v-if="loading" class="empty-state"><div class="empty-state-inner"><LoaderCircle class="spin" :size="28" color="#3977d4" /><p>正在加载任务…</p></div></div>
     <div v-else-if="jobs.length" class="history-list">
       <article v-for="job in jobs" :key="job.id" class="history-row">
         <div class="history-icon"><WandSparkles :size="18" /></div>

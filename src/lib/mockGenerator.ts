@@ -1,6 +1,6 @@
 import type { DraftCell, GenerationOptions } from '../types'
 
-const colors = ['#f8e6d8', '#e1eee1', '#ece7fb', '#f7e5ec', '#e1edf5', '#f9f1d5', '#e9eddd', '#f5e7db']
+const colors = ['#f8e6d8', '#e3edfb', '#ece7fb', '#f7e5ec', '#e1edf5', '#f9f1d5', '#e5ebf7', '#f5e7db']
 const accents = ['✦', '♡', '✿', '☁', '✧', '•', '♡', '✦']
 
 function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -61,7 +61,7 @@ export async function generateMockCells(
     ctx.font = 'bold 38px "Noto Sans SC", sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillStyle = '#536957'
+    ctx.fillStyle = '#496b9c'
     ctx.fillText(accents[index % accents.length], 312, 85)
 
     if (!options.noText) {
@@ -78,12 +78,12 @@ export async function generateMockCells(
       ctx.fillStyle = options.whiteBorder ? '#fff' : 'rgba(255,255,255,.9)'
       ctx.fill()
       ctx.restore()
-      ctx.fillStyle = '#28342b'
+      ctx.fillStyle = '#28364d'
       ctx.fillText(label, size / 2, labelY + 30)
     }
     ctx.font = '500 15px "DM Sans", sans-serif'
     ctx.textAlign = 'right'
-    ctx.fillStyle = 'rgba(44, 58, 46, .55)'
+    ctx.fillStyle = 'rgba(44, 58, 78, .55)'
     ctx.fillText(String(index + 1).padStart(2, '0'), size - 18, size - 15)
 
     return canvas.toDataURL('image/png')

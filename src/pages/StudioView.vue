@@ -214,7 +214,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="loading || latestJob" class="generation-status">
             <div class="generation-status-top"><span><LoaderCircle v-if="loading" class="spin" :size="15" /><Check v-else-if="latestJob?.status === 'completed'" :size="15" /><Clock3 v-else :size="15" />{{ progressText }}</span><strong>{{ progress }}%</strong></div>
-            <el-progress :percentage="progress" :show-text="false" :stroke-width="5" color="#6ca378" />
+            <el-progress :percentage="progress" :show-text="false" :stroke-width="5" color="#4f86e8" />
           </div>
           <el-button v-if="generatedCells.length !== 16" class="primary-button generate-button" type="primary" :loading="loading" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在本地合成…' : '生成 16 格预览' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
           <div v-else class="result-actions"><el-button class="primary-button" type="primary" :loading="zipLoading" @click="downloadZip"><Download :size="16" />下载 16 张 PNG</el-button><el-button class="text-result-button" @click="router.push('/assets')">打开素材库</el-button></div>
