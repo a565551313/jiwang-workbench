@@ -8,9 +8,9 @@
 - 未配置云端时，用户可以本机预览和下载；生成记录与 PNG 暂存在当前浏览器。登录按钮只有在 Supabase 配置完成后才启用邮箱注册/登录。
 - 配置 Supabase 后，参考图和生成贴图会进入私有 Storage；资料、任务及资产元信息保存在 Postgres。迁移开启 Row Level Security，按 `auth.uid()` 隔离用户记录和存储目录。
 - 不包含真实扣费、订单、会员、广场发布/审核或邀请奖励。
-- 管理后台提供运营概览、跨用户任务查看与失败任务重排、用户/汪币管理、主题/提示词配置、模型展示参数和功能开关；数据库端以 `app_metadata.role=admin` 和 RLS/RPC 校验管理权限。
+- 管理后台提供运营概览、跨用户任务查看与失败任务重排、用户/汪币管理、主题/提示词配置、第三方模型配置和功能开关；数据库端以 `app_metadata.role=admin` 和 RLS/RPC 校验管理权限。
 - 未配置 Supabase 时，后台显示有标识的本地演示数据；演示设置只保存在当前浏览器，不代表真实线上运营数据。
-- 管理后台可以配置 OpenAI 兼容的第三方模型服务商、模型 ID、Base URL，并通过受权 RPC 将 API Key 加密保存到 [Supabase Vault](https://supabase.com/docs/guides/database/vault)。密钥不会进入普通配置表、`localStorage` 或浏览器回显。
+- 管理后台可以配置 OpenAI 兼容的第三方模型服务商、模型 ID、Base URL，并通过受权 RPC 将 API Key 加密保存到 [Supabase Vault](https://supabase.com/docs/guides/database/vault)。密钥只在管理员输入/提交时短暂经过浏览器内存并通过 HTTPS RPC 发送；保存后不会从服务端回传给页面，也不会写入普通配置表或 `localStorage`。
 - **配置模型不等于已经启用真实生成**：当前创作流程仍使用 Mock。服务端生成 Worker 尚未接入；部署 Worker 后可通过只授予 `service_role` 的数据库函数在服务端取用 Vault 密钥，再调用配置的第三方模型。
 
 ## 本地运行

@@ -97,7 +97,7 @@ async function saveModelApiKey() {
     await saveAdminModelApiKey(modelApiKey.value.trim())
     modelApiKey.value = ''
     settings.value.model.secretConfigured = true
-    ElMessage.success('API Key 已加密保存在 Supabase Vault；不会显示或写入浏览器')
+    ElMessage.success('API Key 已加密保存在 Supabase Vault；页面不会取回原文或写入本地存储')
     await refresh()
   } catch (cause) {
     ElMessage.error(cause instanceof Error ? cause.message : 'API Key 保存失败')
@@ -264,8 +264,8 @@ async function resetSettings() {
         <section v-else class="admin-section">
           <div class="admin-section-title"><div><h2>模型与系统</h2><p>控制模型连接参数和产品功能开关。</p></div></div>
           <article class="admin-panel model-card"><div class="config-card-title"><span class="config-icon cyan"><Server :size="17" /></span><div><h3>第三方图像模型</h3><p>配置 OpenAI 兼容的第三方服务、模型名称和 API 地址。</p></div><el-switch v-model="settings.model.enabled" /></div>
-            <div class="model-fields"><label><span>服务商 / 接口类型</span><el-input v-model="settings.model.provider" placeholder="如：OpenAI 兼容接口" /></label><label><span>模型名称 / ID</span><el-input v-model="settings.model.name" placeholder="如：gpt-image-2.5、gemini-image" /></label><label class="field-wide"><span>API Base URL（可选）</span><el-input v-model="settings.model.endpoint" placeholder="例如 https://api.example.com/v1；由服务端调用" /></label><label class="field-wide"><span>第三方 API Key</span><div class="model-secret-input"><el-input v-model="modelApiKey" type="password" show-password autocomplete="new-password" :disabled="workspace.demo" placeholder="留空不会更改已保存的密钥" /><el-button class="admin-primary" type="primary" :loading="saving" :disabled="workspace.demo || !modelApiKey.trim()" @click="saveModelApiKey">安全保存密钥</el-button></div><small class="secret-status">{{ workspace.demo ? '演示模式不能保存密钥；连接 Supabase 后可配置。' : settings.model.secretConfigured ? '已保存一把密钥；这里只显示状态，不会回传或展示密钥原文。' : '尚未保存模型密钥。密钥通过 RPC 写入 Supabase Vault。' }}</small></label></div>
-            <div class="secret-note"><ShieldCheck :size="15" /><span>安全说明：API Key 与普通模型配置分开保存，提交后由管理员专属 RPC 写入 Supabase Vault 加密；浏览器不会读取、回显或本地持久化密钥。当前创作流程仍使用 Mock，接入服务端生成 Worker 后才会调用此模型。</span></div>
+            <div class="model-fields"><label><span>服务商 / 接口类型</span><el-input v-model="settings.model.provider" placeholder="如：OpenAI 兼容接口" /></label><label><span>模型名称 / ID</span><el-input v-model="settings.model.name" placeholder="填入供应商提供的模型 ID" /></label><label class="field-wide"><span>API Base URL（可选）</span><el-input v-model="settings.model.endpoint" placeholder="例如 https://api.example.com/v1；由服务端调用" /></label><label class="field-wide"><span>第三方 API Key</span><div class="model-secret-input"><el-input v-model="modelApiKey" type="password" show-password autocomplete="new-password" :disabled="workspace.demo" placeholder="留空不会更改已保存的密钥" /><el-button class="admin-primary" type="primary" :loading="saving" :disabled="workspace.demo || !modelApiKey.trim()" @click="saveModelApiKey">安全保存密钥</el-button></div><small class="secret-status">{{ workspace.demo ? '演示模式不能保存密钥；连接 Supabase 后可配置。' : settings.model.secretConfigured ? '已保存一把密钥；页面只显示状态，不会从 Vault 取回密钥原文。' : '尚未保存模型密钥。密钥通过 RPC 写入 Supabase Vault。' }}</small></label></div>
+            <div class="secret-note"><ShieldCheck :size="15" /><span>安全说明：密钥在输入和提交时短暂经过管理员浏览器内存，并通过 Supabase HTTPS RPC 发送；保存后页面不会取回原文或写入 localStorage。Vault 加密保存后，仅服务端 service_role 可读取。当前创作流程仍使用 Mock，接入服务端生成 Worker 后才会调用此模型。</span></div>
           </article>
           <article class="admin-panel feature-panel"><div class="admin-panel-head"><div><h3>产品功能开关</h3><p>控制产品模块的开放状态</p></div><span class="feature-icon"><ToggleLeft :size="16" /></span></div>
             <div class="feature-row"><div><b>邮箱注册</b><small>允许新用户创建极汪账号</small></div><el-switch v-model="settings.features.signup" /></div>
