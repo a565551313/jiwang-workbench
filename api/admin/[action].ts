@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { handleAdminAuth } from '../../server/adminAuth'
+import { handleAdminAuth } from '../../server/adminAuth.js'
 
 type FunctionRequest = IncomingMessage & { body?: unknown }
 
