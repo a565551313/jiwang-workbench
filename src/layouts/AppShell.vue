@@ -1,26 +1,22 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Images, LogOut, History, WandSparkles, UserRound, Sparkles, ShieldCheck } from '@lucide/vue'
+import { Images, LogOut, History, WandSparkles, UserRound, Sparkles } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
 import AuthDialog from '../components/AuthDialog.vue'
 import { useAuthStore } from '../stores/auth'
-import { supabaseConfigured } from '../lib/supabase'
 
 const route = useRoute()
 const auth = useAuthStore()
 const authOpen = ref(false)
 const pageTitle = computed(() => String(route.meta.title || '创作工作台'))
-const breadcrumbGroup = computed(() => route.path.startsWith('/admin') ? '管理中心' : '创作空间')
+const breadcrumbGroup = computed(() => '创作空间')
 const navItems = [
   { label: '创作工作台', to: '/studio', icon: WandSparkles },
   { label: '我的素材', to: '/assets', icon: Images },
   { label: '生成记录', to: '/history', icon: History },
 ]
-const visibleNavItems = computed(() => [
-  ...navItems,
-  ...(!supabaseConfigured || auth.user?.app_metadata?.role === 'admin' ? [{ label: '管理后台', to: '/admin', icon: ShieldCheck }] : []),
-])
+const visibleNavItems = navItems
 const initial = computed(() => auth.user?.email?.slice(0, 1).toUpperCase() || '汪')
 
 async function signOut() {
