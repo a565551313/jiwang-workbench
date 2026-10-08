@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 type DraftCell = { caption: string; visual: string };
-type ImageApiProtocol = "responses" | "chat_completions" | "legacy_image_edits";
+type ImageApiProtocol = "responses" | "chat_completions";
 type ModelConfig = {
   id: string;
   providerId: string;
@@ -13,7 +13,6 @@ type ModelConfig = {
   enabled: boolean;
   priceCoins: number;
   secretConfigured: boolean;
-  legacy?: boolean;
 };
 type JobOptions = {
   cellCount: number;
@@ -201,7 +200,6 @@ async function imageFromChatCompletion(payload: Record<string, unknown>): Promis
 }
 
 async function callImageModel(endpoint: string, apiKey: string, model: ModelConfig, reference: Blob, prompt: string): Promise<ImagePayload> {
-  const referenceExtension = reference.type === "image/jpeg" ? "jpg" : reference.type === "image/webp" ? "webp" : "png";
   const referenceUrl = `data:${reference.type || "image/png"};base64,${base64FromBytes(new Uint8Array(await reference.arrayBuffer()))}`;
   if (model.protocol === "responses") {
     const response = await fetch(`${endpoint}/responses`, {
@@ -230,30 +228,6 @@ async function callImageModel(endpoint: string, apiKey: string, model: ModelConf
     const first = dataRows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
     if (first) return await imageFromResponse(first);
     throw new Error("Responses API 未返回图像结果");
-  }
-
-  if (model.protocol === "legacy_image_edits") {
-    const form = new FormData();
-    form.append("model", model.name);
-    form.append("prompt", prompt);
-    form.append("image[]", reference, `reference-image.${referenceExtension}`);
-    form.append("n", "1");
-    form.append("size", "1024x1024");
-    const response = await fetch(`${endpoint}/images/edits`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: form,
-      redirect: "error",
-      signal: AbortSignal.timeout(40_000),
-    });
-    if (!response.ok) throw new Error(`模型 ${model.name} 请求失败（${response.status}）`);
-    let payload: unknown;
-    try { payload = await response.json(); } catch { throw new Error("模型返回的不是有效 JSON"); }
-    const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-    const rows = Array.isArray(root.data) ? root.data : [];
-    const first = rows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
-    if (!first) throw new Error("模型没有返回图像数据");
-    return await imageFromResponse(first);
   }
 
   const response = await fetch(`${endpoint}/chat/completions`, {
@@ -326,9 +300,7 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
   const storedPaths: string[] = [];
   let balanceAfterReserve = 0;
   try {
-    const secretResult = model.legacy
-      ? await admin.rpc("worker_get_image_model_api_key", { p_model_id: model.id })
-      : await admin.rpc("worker_get_image_provider_api_key", { p_provider_id: model.providerId });
+    const secretResult = await admin.rpc("worker_get_image_provider_api_key", { p_provider_id: model.providerId });
     const { data: secret, error: secretError } = secretResult;
     if (secretError || typeof secret !== "string" || !secret) throw new Error("此模型未启用或尚未配置 API Key");
 
@@ -444,26 +416,7 @@ async function currentModel(admin: SupabaseClient, modelId: string): Promise<Mod
     return model;
   }
 
-  // Transitional read support lets the newly deployed function continue working before the data migration is applied.
-  const legacyModels = Array.isArray(value.models) ? value.models as Array<Record<string, unknown>> : [];
-  const legacy = legacyModels.find((item) => item.id === modelId);
-  if (!legacy) throw new Error("所选模型不存在或配置格式已更新");
-  const legacyModel: ModelConfig = {
-    id: String(legacy.id || ""),
-    providerId: String(legacy.id || ""),
-    provider: safeText(legacy.provider, 160),
-    protocol: "legacy_image_edits",
-    name: safeText(legacy.name, 160),
-    endpoint: safeText(legacy.endpoint, 2048),
-    enabled: legacy.enabled === true,
-    priceCoins: Number(legacy.priceCoins),
-    secretConfigured: legacy.secretConfigured === true,
-    legacy: true,
-  };
-  if (!legacyModel.enabled || !legacyModel.secretConfigured) throw new Error("所选模型已停用或未配置 API Key");
-  if (!Number.isInteger(legacyModel.priceCoins) || legacyModel.priceCoins < 1 || legacyModel.priceCoins > 100000) throw new Error("该模型尚未设置有效汪币价格");
-  if (!safeText(legacyModel.name, 160) || !isUuid(legacyModel.id)) throw new Error("模型配置无效");
-  return legacyModel;
+  throw new Error("所选模型不存在或配置格式已更新");
 }
 
 async function handleModelList(admin: SupabaseClient, user: { id: string; app_metadata: Record<string, unknown> }, body: Record<string, unknown>) {
