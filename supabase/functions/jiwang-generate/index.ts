@@ -1,6 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
+import { cleanupExpiredReferences } from "../_shared/reference-cleanup.ts";
 import {
+  admissionFailure,
   base64FromBytes,
   BATCH_SIZE,
   bytesFromBase64,
@@ -31,6 +33,7 @@ import {
   UpstreamHttpError,
   upstreamErrorMessage,
   upstreamNetworkError,
+  USED_REFERENCE_DAYS,
   validateCells,
   validateReferencePath,
 } from "./shared.ts";
@@ -595,14 +598,17 @@ async function generateBatches(
 async function sweepStaleGenerations(admin: SupabaseClient): Promise<void> {
   try {
     const { data, error } = await admin.rpc("worker_reap_stale_generations", { p_stale_minutes: STALE_MINUTES, p_limit: 20 });
-    if (error || !Array.isArray(data)) return;
-    for (const row of data as Array<{ result_job_id: string; result_user_id: string; result_status: string }>) {
-      if (row.result_status === "failed") await cleanupJobArtifacts(admin, row.result_user_id, row.result_job_id).catch(() => undefined);
-      else await removeUndeliveredObjects(admin, row.result_user_id, row.result_job_id).catch(() => undefined);
+    if (!error && Array.isArray(data)) {
+      for (const row of data as Array<{ result_job_id: string; result_user_id: string; result_status: string }>) {
+        if (row.result_status === "failed") await cleanupJobArtifacts(admin, row.result_user_id, row.result_job_id).catch(() => undefined);
+        else await removeUndeliveredObjects(admin, row.result_user_id, row.result_job_id).catch(() => undefined);
+      }
     }
   } catch {
     // Recovery is best-effort and must not block the current request.
   }
+  // A small batch of expired reference photos is also removed here; the scheduled cleanup does the rest.
+  await cleanupExpiredReferences(admin, 1, 20).catch(() => undefined);
 }
 
 async function maintenanceEnabled(admin: SupabaseClient): Promise<boolean> {
@@ -721,6 +727,22 @@ async function handleRetry(admin: SupabaseClient, user: { id: string }, body: Re
   if (error || !job || job.user_id !== user.id) return respond(404, { error: "任务不存在" });
   if (job.status !== "failed") return respond(409, { error: "只有失败的任务可以重新生成", jobId });
   if (!validateReferencePath(job.reference_path, user.id)) return respond(409, { error: "参考图已不可用，请重新创建任务。", jobId });
+  // Reference photos are deleted after USED_REFERENCE_DAYS since the last generation; without one there is no retry.
+  const { data: reference, error: referenceError } = await admin
+    .from("assets")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("kind", "reference")
+    .eq("storage_path", job.reference_path)
+    .maybeSingle();
+  if (referenceError) return respond(500, { error: `无法检查参考图（${safeText(referenceError.message, 160)}）。本次未重新生成，也未扣费。`, jobId });
+  if (!reference) {
+    return respond(409, {
+      error: `参考图已超过 ${USED_REFERENCE_DAYS} 天保留期限并被自动删除，无法重新生成。请重新上传角色图创建新任务。本次未扣费。`,
+      code: "reference_missing",
+      jobId,
+    });
+  }
 
   let model: ModelConfig;
   try {
@@ -733,7 +755,11 @@ async function handleRetry(admin: SupabaseClient, user: { id: string }, body: Re
     p_model_name: model.name,
     p_price_coins: model.priceCoins,
   });
-  if (beginError) return respond(409, { error: `无法开始重新生成：${safeText(beginError.message, 160)}。请刷新任务历史后再试。`, jobId });
+  if (beginError) {
+    const admission = admissionFailure(beginError.message);
+    if (admission) return respond(admission.status, { error: admission.message, code: admission.code, jobId });
+    return respond(409, { error: `无法开始重新生成：${safeText(beginError.message, 160)}。请刷新任务历史后再试。`, jobId });
+  }
 
   // Remove files left by the previous attempt before the new attempt writes its own.
   await cleanupJobArtifacts(admin, user.id, jobId).catch(() => undefined);
@@ -829,31 +855,31 @@ Deno.serve(async (request: Request) => {
     }
 
     if (await maintenanceEnabled(admin)) {
-      return respond(503, { error: "极汪正在维护，暂不接受新的生成任务；尚未创建任务，也未预扣汪币。", maintenance: true });
+      return respond(503, { error: "极汪正在维护，暂不接受新的生成任务；尚未创建任务，也未预扣汪币。", code: "maintenance", maintenance: true });
     }
 
     const model = await currentModel(admin, modelId);
-    const { error: insertError } = await admin.from("generation_jobs").insert({
-      id: jobId,
-      client_request_id: jobId,
-      user_id: userResult.user.id,
-      kind: "sticker_grid",
-      status: "queued",
-      title,
-      topic,
-      model_id: model.id,
-      model_name: model.name,
-      price_coins: model.priceCoins,
-      reference_path: referencePath,
-      progress: 0,
-      options,
+    // Creating the job also checks the reference photo, the concurrency cap and the daily cap in one transaction.
+    // If any check fails nothing is inserted and nothing is charged.
+    const { error: admitError } = await admin.rpc("worker_create_generation_job", {
+      p_job_id: jobId,
+      p_user_id: userResult.user.id,
+      p_title: title,
+      p_topic: topic,
+      p_model_id: model.id,
+      p_model_name: model.name,
+      p_price_coins: model.priceCoins,
+      p_reference_path: referencePath,
+      p_options: options,
     });
-    if (insertError) {
-      const duplicate = insertError.code === "23505";
+    if (admitError) {
+      const admission = admissionFailure(admitError.message);
+      if (admission) return respond(admission.status, { error: admission.message, code: admission.code });
+      const duplicate = admitError.code === "23505";
       return respond(duplicate ? 409 : 500, {
         error: duplicate
           ? "任务编号已使用，尚未启动模型调用。请返回工坊重新发起任务。"
-          : `无法创建生成任务（${safeText(insertError.message, 220)}），模型调用尚未开始且未预扣汪币。请管理员检查 generation_jobs 表、数据库连接和权限。`,
+          : `无法创建生成任务（${safeText(admitError.message, 220)}），模型调用尚未开始且未预扣汪币。请管理员检查 generation_jobs 表、数据库连接和权限。`,
       });
     }
 

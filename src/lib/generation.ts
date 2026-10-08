@@ -46,10 +46,18 @@ export interface GenerationStatusRow {
 }
 
 export class GenerationHttpError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code = '') {
     super(message)
     this.name = 'GenerationHttpError'
   }
+}
+
+/** Server codes for requests refused before a job was created or any coins were reserved. */
+const NOT_STARTED_CODES = new Set(['maintenance', 'quota_concurrent', 'quota_daily', 'reference_missing'])
+
+/** True when the server refused the request before starting anything, so nothing was charged. */
+export function isNotStartedError(error: unknown): error is GenerationHttpError {
+  return error instanceof GenerationHttpError && NOT_STARTED_CODES.has(error.code)
 }
 
 /** Turn transport, upstream and legacy server errors into actionable Chinese guidance. */
@@ -201,13 +209,19 @@ function errorMessage(value: unknown): string | undefined {
   return typeof error.error === 'string' ? error.error : undefined
 }
 
+function errorCode(value: unknown): string {
+  if (!value || typeof value !== 'object') return ''
+  const code = (value as Record<string, unknown>).code
+  return typeof code === 'string' ? code : ''
+}
+
 async function invokeGenerationFunction(body: Record<string, unknown>): Promise<StickerGenerationResult> {
   if (!supabase || !supabaseConfigured) throw new Error('真实生成服务尚未配置 Supabase')
   const { data, error } = await supabase.functions.invoke('jiwang-generate', { body })
   if (error) {
     if (error.context instanceof Response) {
       const payload = await error.context.clone().json().catch(() => null)
-      throw new GenerationHttpError(errorMessage(payload) || error.message, error.context.status)
+      throw new GenerationHttpError(errorMessage(payload) || error.message, error.context.status, errorCode(payload))
     }
     throw new Error(error.message)
   }

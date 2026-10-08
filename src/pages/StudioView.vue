@@ -14,6 +14,7 @@ import {
   explainPreparationError,
   GenerationHttpError,
   generateStickers,
+  isNotStartedError,
   loadEnabledImageModels,
   loadGenerationImages,
   loadGenerationStatus,
@@ -294,12 +295,17 @@ async function generate() {
     await settleSuccess(job, result, model.priceCoins)
   } catch (error) {
     const message = error instanceof Error ? error.message : '生成失败，请检查模型配置后重试'
-    if (error instanceof GenerationHttpError && error.status === 503 && /维护/.test(message)) {
-      // The server refuses before creating a job, so there is nothing to reconcile.
-      features.value = { ...features.value, maintenance: true }
+    if (isNotStartedError(error)) {
+      // The server refused before creating a job or reserving coins (maintenance, usage caps, expired photo).
+      if (error.code === 'maintenance') features.value = { ...features.value, maintenance: true }
+      if (error.code === 'reference_missing') {
+        // The stored photo has expired. Forget the old path so the next click uploads the selected file again.
+        referenceStoragePath.value = ''
+        referenceUpload = null
+      }
       latestJob.value = null
       progress.value = 0
-      progressText.value = '服务维护中：尚未创建任务，也未扣费'
+      progressText.value = '尚未创建任务，也未扣费'
       ElMessage.warning(message)
       return
     }
@@ -435,7 +441,7 @@ onBeforeUnmount(() => {
             <el-button class="soft-button replace-button" @click="chooseFile">更换图片</el-button>
             <button class="remove-file" aria-label="移除图片" @click="removeFile"><X :size="17" /></button>
           </div>
-          <p class="privacy-note"><span class="privacy-shield">✓</span> {{ auth.isSignedIn && supabaseConfigured ? '登录后会保存到你的私有素材空间' : '本地预览只保留在此浏览器；配置云端后可按账号私有保存' }}</p>
+          <p class="privacy-note"><span class="privacy-shield">✓</span> {{ auth.isSignedIn && supabaseConfigured ? '登录后会保存到你的私有素材空间；未用于生成的角色图 7 天后自动删除，生成过的保留 30 天' : '本地预览只保留在此浏览器；配置云端后可按账号私有保存' }}</p>
         </section>
 
         <section class="work-card theme-card">

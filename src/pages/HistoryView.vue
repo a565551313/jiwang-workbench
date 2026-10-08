@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { Check, Clock3, History, LoaderCircle, RefreshCw, WandSparkles, X } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchJobs } from '../lib/repository'
-import { explainGenerationError, loadEnabledImageModels, retryGenerationJob } from '../lib/generation'
+import { explainGenerationError, isNotStartedError, loadEnabledImageModels, retryGenerationJob } from '../lib/generation'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
 import type { GenerationJob } from '../types'
@@ -68,7 +68,9 @@ async function retryJob(job: GenerationJob) {
       : '重新生成完成，已保存到素材库')
   } catch (cause) {
     if (cause !== 'cancel' && cause !== 'close') {
-      ElMessage.error(cause instanceof Error ? explainGenerationError(cause) : '重新生成失败')
+      // Usage caps and expired reference photos are refused before anything is charged; the server message says so.
+      if (isNotStartedError(cause)) ElMessage.warning(cause.message)
+      else ElMessage.error(cause instanceof Error ? explainGenerationError(cause) : '重新生成失败')
     }
   } finally {
     retryingJobId.value = ''
@@ -87,6 +89,7 @@ watch(() => auth.user?.id, () => { void load() })
       <el-button class="soft-button" @click="load"><RefreshCw :size="14" />刷新记录</el-button>
     </div>
     <el-alert class="subtle-alert" type="info" :closable="false" show-icon>{{ sourceLabel }} · 生成由服务端模型处理；未交付的部分会自动退回汪币，请以余额和退款记录为准。</el-alert>
+    <el-alert class="subtle-alert" type="info" :closable="false" show-icon>使用上限：同时进行中最多 2 套，每天（北京时间）最多开始 10 套，重新生成也计入。角色图在最后一次使用后保留 30 天，之后不能再重新生成。</el-alert>
     <el-alert v-if="loadError" class="subtle-alert" type="error" :closable="false" show-icon>{{ loadError }} <el-button link type="primary" @click="load">重试读取</el-button></el-alert>
     <div class="assets-toolbar"><div class="asset-count"><strong>{{ jobs.length }}</strong>条任务 <span>· 已完成 {{ completedCount }} 条</span></div></div>
     <div v-if="loading" class="empty-state"><div class="empty-state-inner"><LoaderCircle class="spin" :size="28" color="#3977d4" /><p>正在加载任务…</p></div></div>

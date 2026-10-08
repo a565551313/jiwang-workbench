@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  admissionFailure,
   base64FromBytes,
   bytesFromBase64,
+  CONCURRENT_JOB_LIMIT,
   chargeForDelivered,
+  DAILY_START_LIMIT,
   isFatalUpstreamStatus,
   isNonPublicAddress,
   isUuid,
@@ -17,6 +20,8 @@ import {
   UpstreamHttpError,
   upstreamErrorMessage,
   validateCells,
+  USED_REFERENCE_DAYS,
+  UNUSED_REFERENCE_DAYS,
   validateReferencePath,
   type JobOptions,
 } from '../functions/jiwang-generate/shared'
@@ -263,5 +268,43 @@ describe('进度与计费换算（需与 SQL 结算一致）', () => {
     expect(chargeForDelivered(60, 1)).toBe(4) // 向上取整
     expect(chargeForDelivered(60, 0)).toBe(0)
     expect(chargeForDelivered(1, 1)).toBe(1)
+  })
+})
+
+describe('使用上限与保留期限的错误映射', () => {
+  it('上限数值与产品规则一致', () => {
+    expect(CONCURRENT_JOB_LIMIT).toBe(2)
+    expect(DAILY_START_LIMIT).toBe(10)
+    expect(UNUSED_REFERENCE_DAYS).toBe(7)
+    expect(USED_REFERENCE_DAYS).toBe(30)
+  })
+
+  it('同时进行中超限返回 429 与稳定的错误码', () => {
+    const failure = admissionFailure('generation_quota_concurrent')
+    expect(failure?.status).toBe(429)
+    expect(failure?.code).toBe('quota_concurrent')
+    expect(failure?.message).toContain('2 套')
+    expect(failure?.message).toContain('未扣费')
+  })
+
+  it('每日超限返回 429，并说明北京时间与重新生成计入次数', () => {
+    const failure = admissionFailure('generation_quota_daily')
+    expect(failure?.status).toBe(429)
+    expect(failure?.code).toBe('quota_daily')
+    expect(failure?.message).toContain('10 套')
+    expect(failure?.message).toContain('北京时间')
+    expect(failure?.message).toContain('重新生成也计入')
+  })
+
+  it('参考图缺失返回 409，提示重新上传', () => {
+    const failure = admissionFailure('generation_reference_missing')
+    expect(failure?.status).toBe(409)
+    expect(failure?.code).toBe('reference_missing')
+    expect(failure?.message).toContain('重新上传')
+  })
+
+  it('无关的数据库错误不做映射', () => {
+    expect(admissionFailure('duplicate key value violates unique constraint')).toBeNull()
+    expect(admissionFailure('')).toBeNull()
   })
 })

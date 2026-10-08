@@ -315,3 +315,48 @@ export function progressForDelivered(delivered: number): number {
 export function chargeForDelivered(charged: number, delivered: number): number {
   return Math.ceil((charged * delivered) / CELL_COUNT);
 }
+
+// ---------------------------------------------------------------------------
+// 使用上限与参考图保留期限（数值需与 20261008130000_retention_and_quotas.sql 保持一致）
+// ---------------------------------------------------------------------------
+
+/** 同一用户同时进行中（queued / processing）的任务上限。 */
+export const CONCURRENT_JOB_LIMIT = 2;
+/** 同一用户每个北京时间自然日可开始的任务数（重新生成也计入）。 */
+export const DAILY_START_LIMIT = 10;
+/** 上传后从未用于生成的参考图保留天数。 */
+export const UNUSED_REFERENCE_DAYS = 7;
+/** 最后一次用于生成后，参考图的保留天数；之后不能再重新生成。 */
+export const USED_REFERENCE_DAYS = 30;
+
+export type AdmissionFailure = { status: number; code: string; message: string };
+
+/**
+ * Map errors raised by the admission and reference guards (SQL) to HTTP status, a stable code for the
+ * client, and a Chinese message. Returns null for any other error.
+ */
+export function admissionFailure(message: string): AdmissionFailure | null {
+  const text = typeof message === "string" ? message : "";
+  if (text.includes("generation_quota_concurrent")) {
+    return {
+      status: 429,
+      code: "quota_concurrent",
+      message: `同时进行中的任务已达 ${CONCURRENT_JOB_LIMIT} 套上限，请等待当前任务完成后再开始。本次未开始生成，也未扣费。`,
+    };
+  }
+  if (text.includes("generation_quota_daily")) {
+    return {
+      status: 429,
+      code: "quota_daily",
+      message: `今天（北京时间）开始的任务已达 ${DAILY_START_LIMIT} 套上限，请明天再试；重新生成也计入次数。本次未开始生成，也未扣费。`,
+    };
+  }
+  if (text.includes("generation_reference_missing")) {
+    return {
+      status: 409,
+      code: "reference_missing",
+      message: `角色参考图已超过保留期限并被自动删除。请再点一次「生成」，系统会重新上传当前选择的角色图。本次未创建任务，也未扣费。`,
+    };
+  }
+  return null;
+}

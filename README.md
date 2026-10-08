@@ -15,6 +15,8 @@
 - **重新生成**：只有任务所有者可以对失败任务重新生成。点击后会显示当前价格并要求确认；每次重试都是新的“尝试”，有独立的扣费与退款记录。管理员后台不能代用户扣费重试。
 - **超时回收**：处理超过 10 分钟仍未结束的任务会被服务端自动结算（按已交付张数）；从未启动的排队任务直接结束且不扣费。回收函数 `worker_reap_stale_generations` 会在每次生成请求时顺带执行，并可由 pg_cron 每 5 分钟执行。
 - **维护模式**：管理员在后台开启后，服务端拒绝新建生成任务（已在进行中的任务不受影响）。
+- **使用上限**：同一用户同时进行中（排队或处理中）最多 2 套；每个北京时间自然日最多开始 10 套，重新生成也计入。超过上限时服务端直接拒绝，不创建任务、不预扣汪币。
+- **角色图保留期限**：上传后从未用于生成的角色图，7 天后自动删除；用于生成过的，最后一次使用后保留 30 天。超过 30 天后任务不能再“重新生成”（不扣费），需要重新上传角色图创建新任务。
 - `src/lib/archive.ts` 只负责下载图片并打包 ZIP；浏览器不会直接写入生成任务或扣款记录。
 - 本地未连接 Supabase 时，前台可编辑主题草案和预览布局，但不能发起真实模型调用或扣汪币。
 
@@ -38,7 +40,7 @@ Supabase 云端运营数据通过 RLS 和数据库 RPC 校验。管理员数据�
 - 用户只能登记自己 `references/` 目录下的参考图，不能直接写入生成结果、任务或账本。
 - 匿名角色没有任何业务表的权限；余额只能通过服务端函数和管理员 RPC 变动。
 
-管理后台的独立账号仍由服务端环境变量配置：签名的 12 小时 `HttpOnly`、`SameSite=Strict` Cookie、同源校验与失败限流继续生效。它与 Supabase 运营数据授权是两道独立检查。
+管理后台的独立账号仍由服务端环境变量配置：签名的 2 小时 `HttpOnly`、`SameSite=Strict` Cookie（过期需重新登录）、同源校验与失败限流继续生效。它与 Supabase 运营数据授权是两道独立检查。
 
 ## 本地启动
 
@@ -65,8 +67,9 @@ npm run build
 `npm test` 包含三类测试，无需连接 Supabase：
 
 - `src/lib`：前端校验、模型列表、ZIP 打包与错误提示。
-- `supabase/tests/generate-shared.test.ts`：Edge Function 的纯函数（SSRF 判断、Base URL 校验、流式字节上限、计费与进度换算）。
-- `supabase/tests/*.test.ts`：使用 PGlite（WASM 版 Postgres）按顺序加载仓库中的真实迁移文件，验证计费、部分交付、超时回收、RLS 与密钥绑定。
+- `supabase/tests/generate-shared.test.ts`：Edge Function 的纯函数（SSRF 判断、Base URL 校验、流式字节上限、计费与进度换算、上限错误映射）。
+- `server/adminAuth.test.ts`：管理员会话的有效期（2 小时）与签名校验。
+- `supabase/tests/*.test.ts`：使用 PGlite（WASM 版 Postgres）按顺序加载仓库中的真实迁移文件，验证计费、部分交付、超时回收、RLS 与密钥绑定，以及同时进行中上限、每日上限（北京时间）、参考图保留期限与清理口令。
 
 ## Supabase 迁移与生成函数
 
@@ -77,12 +80,37 @@ npm run build
 3. [`supabase/migrations/20261008090000_multi_model_billing.sql`](supabase/migrations/20261008090000_multi_model_billing.sql)
 4. [`supabase/migrations/20261008103000_provider_model_settings.sql`](supabase/migrations/20261008103000_provider_model_settings.sql)
 5. [`supabase/migrations/20261008120000_generation_recovery.sql`](supabase/migrations/20261008120000_generation_recovery.sql)
+6. [`supabase/migrations/20261008130000_retention_and_quotas.sql`](supabase/migrations/20261008130000_retention_and_quotas.sql)
 
-第 3 个迁移会将旧模型配置和 Vault 密钥迁移为模型列表；原模型保留停用状态、价格设为 0，因此不会自动出现在前台或触发扣费。第 4 个迁移把供应商级别的协议、Base URL 与密钥写入新结构。第 5 个迁移加入按尝试记账、部分交付结算、超时回收、密钥与 Base URL 绑定、素材表权限收紧，以及前台功能开关的只读接口。
+第 3 个迁移会将旧模型配置和 Vault 密钥迁移为模型列表；原模型保留停用状态、价格设为 0，因此不会自动出现在前台或触发扣费。第 4 个迁移把供应商级别的协议、Base URL 与密钥写入新结构。第 5 个迁移加入按尝试记账、部分交付结算、超时回收、密钥与 Base URL 绑定、素材表权限收紧，以及前台功能开关的只读接口。第 6 个迁移加入同时进行中上限、每日开始次数上限、参考图保留期限，以及定时清理所需的数据库函数。
 
 **升级注意**：第 5 个迁移会为升级前已保存密钥的供应商记录“当前”的 Base URL。如果升级前曾改过某个供应商的地址，请在后台重新保存该供应商的 API Key。
 
+**升级注意（第 6 个迁移）**：升级后，已经超过保留期限的旧参考图会在下一次清理时删除（未用于生成且上传超过 7 天，或最后一次用于生成已超过 30 天）。如需保留，请在升级前自行下载。
+
 **定时回收（可选）**：第 5 个迁移会尝试启用 pg_cron，每 5 分钟调用一次 `worker_reap_stale_generations()`。若项目不支持 pg_cron，迁移只会输出提示；超时任务仍会在下一次生成请求时被回收。
+
+**参考图定时清理（建议一次性设置）**：删除照片必须通过 Storage API 完成。直接删除 `storage.objects` 中的行只会留下无人引用的文件，所以清理由 Edge Function `jiwang-cleanup` 完成，并由 pg_cron 通过 pg_net 每天北京时间 03:17 调用一次。设置步骤：
+
+1. 部署清理函数（**必须关闭平台 JWT 校验**，见下文原因）：
+
+   ```bash
+   supabase functions deploy jiwang-cleanup --no-verify-jwt --project-ref <project-ref>
+   ```
+
+2. 生成一个随机口令，例如 `openssl rand -hex 32`，然后在 SQL Editor 中执行（尖括号部分换成真实值；不要把真实密钥或口令提交到仓库或发到聊天中）：
+
+   ```sql
+   select vault.create_secret('https://<project-ref>.supabase.co', 'jiwang_project_url');
+   select vault.create_secret('<随机口令，至少 32 个字符>', 'jiwang_cleanup_secret');
+   select public.enable_scheduled_cleanup();
+   ```
+
+为什么要关闭平台 JWT 校验：定时调用没有用户登录令牌，而较新的 `sb_secret_` 密钥不是 JWT，不能放在 `Authorization` 里，平台校验会直接返回 401。因此 `jiwang-cleanup` 自己校验 `x-cleanup-secret` 请求头，口令只保存在 Vault 中；口令不对的请求不会删除任何文件。`jiwang-generate` 仍保持平台 JWT 校验。
+
+如何确认定时清理在工作：在 SQL Editor 中执行 `select status_code, content from net._http_response order by id desc limit 5;`，返回 `200` 且内容包含 `removed` 即正常。返回 `401` 时，若内容是 `清理请求未通过校验`，说明口令不一致；若是平台的 “Missing authorization header” 等信息，说明部署时没有加 `--no-verify-jwt`。
+
+如果没有完成这一步，过期照片只会在有人发起生成时顺带清理一小批，闲置期间可能保留更久。
 
 部署生成 Edge Function：
 
@@ -90,7 +118,9 @@ npm run build
 supabase functions deploy jiwang-generate --project-ref <project-ref>
 ```
 
-该函数要求 JWT 登录验证，并使用 Supabase 托管环境变量 `SUPABASE_URL`、`SUPABASE_ANON_KEY` 和 `SUPABASE_SERVICE_ROLE_KEY`。不要把 service role key 复制到前端。若通过 Supabase Dashboard / 管理工具发布，也必须启用 JWT 验证。函数目录内的 `shared.ts` 会随函数一起部署。
+（定时清理函数见上文“参考图定时清理”，它需要用 `--no-verify-jwt` 单独部署。）
+
+该函数要求 JWT 登录验证，并使用 Supabase 托管环境变量 `SUPABASE_URL`、`SUPABASE_ANON_KEY` 和 `SUPABASE_SERVICE_ROLE_KEY`。不要把 service role key 复制到前端。若通过 Supabase Dashboard / 管理工具发布，也必须启用 JWT 验证。函数目录内的 `shared.ts`，以及 `supabase/functions/_shared/` 目录，会随函数一起部署。
 
 完成迁移与函数部署后，在 `/admin` 的“模型与系统”新增或检查模型，填写 HTTPS Base URL、模型 ID、汪币价格，保存 API Key，再启用并保存模型设置。现有旧密钥已经绑定到原来的 `gpt-image-2.5` 配置，不会自动启用；可先用管理员提供的测试模型/测试账户进行验证。
 
@@ -101,9 +131,9 @@ supabase functions deploy jiwang-generate --project-ref <project-ref>
 ## 已知限制
 
 - 管理员登录的失败限流保存在单个服务实例内存中；多实例或冷启动后会失效。需要强约束时，应改用共享存储（如 Redis 或数据库）。
-- 管理员会话为无状态签名 Cookie，登出只清除 Cookie；泄露的会话在 12 小时内仍有效。
+- 管理员会话为无状态签名 Cookie，登出只清除 Cookie；泄露的会话在 2 小时内仍有效。管理员账号只提供给少数可信人员，密码应足够长且随机（例如 `openssl rand -base64 24` 生成）；这是已接受的风险。
 - Edge Function 的地址检查只基于主机名字符串，不做 DNS 解析；DNS 重绑定等网络层风险需要在出口网络侧控制。
 - “邮箱注册”开关只隐藏前台入口；真正禁止注册还需在 Supabase Auth 中关闭。
-- 用户上传的参考图会保留在私有存储中，目前没有自动清理策略。
-- 生成请求没有用户级的频率或并发限制；成本上限只受汪币余额约束。
+- 参考图清理依赖定时调用：未完成“参考图定时清理”的一次性设置时，过期照片只在有人生成时顺带清理一小批。
+- 同时进行中的数量按任务状态计算；卡住的任务要等超时回收（10 分钟）后才释放名额。每日次数与名额由数据库计数，但仍是产品层面的软上限，成本上限同时受汪币余额约束。
 - 主题预设目前由创作工坊内置，后台暂不提供编辑。

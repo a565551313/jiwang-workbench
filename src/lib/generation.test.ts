@@ -1,13 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }))
+const { rpc, invoke } = vi.hoisted(() => ({ rpc: vi.fn(), invoke: vi.fn() }))
 
 vi.mock('./supabase', () => ({
-  supabase: { rpc },
+  supabase: { rpc, functions: { invoke } },
   supabaseConfigured: true,
 }))
 
-import { defaultPublicFeatures, explainGenerationError, explainPreparationError, loadEnabledImageModels, loadPublicFeatures } from './generation'
+import {
+  defaultPublicFeatures,
+  explainGenerationError,
+  explainPreparationError,
+  GenerationHttpError,
+  isNotStartedError,
+  loadEnabledImageModels,
+  loadPublicFeatures,
+  retryGenerationJob,
+} from './generation'
 
 const modelRow = {
   id: '41223bf7-d355-42c4-800f-7b31ae33267b',
@@ -97,3 +106,41 @@ describe('站点功能开关', () => {
   })
 })
 
+describe('生成服务的错误码', () => {
+  beforeEach(() => invoke.mockReset())
+
+  function failedInvoke(status: number, payload: Record<string, unknown>) {
+    invoke.mockResolvedValue({
+      data: null,
+      error: Object.assign(new Error('Edge Function returned a non-2xx status code'), {
+        context: new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } }),
+      }),
+    })
+  }
+
+  it('开始前被拒绝的请求保留错误码，界面可以判断为「未开始、未扣费」', async () => {
+    failedInvoke(429, { error: '今天已达上限，请明天再试。', code: 'quota_daily' })
+    const error = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(GenerationHttpError)
+    expect(error).toMatchObject({ status: 429, code: 'quota_daily', message: '今天已达上限，请明天再试。' })
+    expect(isNotStartedError(error)).toBe(true)
+  })
+
+  it('参考图过期与维护同样属于「未开始」', async () => {
+    failedInvoke(409, { error: '参考图已过期', code: 'reference_missing' })
+    const missing = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(isNotStartedError(missing)).toBe(true)
+
+    failedInvoke(503, { error: '维护中', code: 'maintenance', maintenance: true })
+    const maintenance = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(isNotStartedError(maintenance)).toBe(true)
+  })
+
+  it('普通错误没有错误码，不会被当作未开始', async () => {
+    failedInvoke(502, { error: '上游模型暂时不可用' })
+    const error = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(GenerationHttpError)
+    expect(error).toMatchObject({ status: 502, code: '' })
+    expect(isNotStartedError(error)).toBe(false)
+  })
+})

@@ -21,6 +21,7 @@ describe('数据库迁移链', () => {
       '20261008090000_multi_model_billing.sql',
       '20261008103000_provider_model_settings.sql',
       '20261008120000_generation_recovery.sql',
+      '20261008130000_retention_and_quotas.sql',
     ])
   })
 
@@ -42,6 +43,11 @@ describe('数据库迁移链', () => {
       'worker_update_generation_progress',
       'worker_get_image_provider_api_key',
       'public_site_features',
+      'worker_create_generation_job',
+      'worker_expired_reference_images',
+      'worker_delete_reference_rows',
+      'enable_scheduled_cleanup',
+      'worker_cleanup_secret_matches',
     ]) {
       expect(functionNames.has(name), name).toBe(true)
     }
