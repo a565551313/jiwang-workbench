@@ -422,14 +422,14 @@ async function resetSettings() {
           <label class="provider-form-wide"><span>Base URL</span><el-input v-model="providerDraft.baseUrl" placeholder="例如 https://api.example.com/v1" /></label>
           <label class="provider-form-wide"><span>API Key</span><el-input v-model="providerApiKey" type="password" show-password autocomplete="new-password" :disabled="workspace?.demo" :placeholder="providerDraft.secretConfigured ? '留空保持已保存的密钥不变' : '输入上游 API Key'" /><small>{{ workspace?.demo ? '演示模式无法安全保存密钥，请连接 Supabase 后配置。' : providerDraft.secretConfigured ? '密钥已保存在 Vault；此处不会显示原文。输入新密钥可替换。' : '密钥仅会加密保存到 Supabase Vault，不会保存到浏览器。' }}</small></label>
         </div>
-        <div class="provider-model-toolbar"><div><strong>模型列表</strong><small>模型 ID、额外汪币、启用状态可逐项编辑</small></div><div><el-button class="admin-quiet" :loading="fetchingModels" :disabled="workspace?.demo || !workspace?.providerModelSchemaReady" @click="fetchModels"><RefreshCw :size="14" />获取模型</el-button><el-button class="admin-quiet" :disabled="!workspace?.demo && !workspace?.providerModelSchemaReady" @click="addProviderModel"><Plus :size="14" />手动添加</el-button></div></div>
+        <div class="provider-model-toolbar"><div><strong>模型列表</strong><small>启用状态可先勾选；保存前需填写模型 ID、正数汪币价格并配置 API Key</small></div><div><el-button class="admin-quiet" :loading="fetchingModels" :disabled="workspace?.demo || !workspace?.providerModelSchemaReady" @click="fetchModels"><RefreshCw :size="14" />获取模型</el-button><el-button class="admin-quiet" :disabled="!workspace?.demo && !workspace?.providerModelSchemaReady" @click="addProviderModel"><Plus :size="14" />手动添加</el-button></div></div>
         <div v-if="fetchingModels" class="provider-fetching"><LoaderCircle class="spin" :size="15" />正在从上游获取模型列表…</div>
         <div v-else-if="providerDraft.models.length" class="provider-edit-list">
           <div class="provider-edit-header"><span>模型 ID</span><span>额外汪币</span><span>启用</span><span>删除</span></div>
           <div v-for="(model, index) in providerDraft.models" :key="model.id" class="provider-edit-row">
             <el-input v-model="model.name" placeholder="例如 gpt-image-2.5" />
             <el-input-number v-model="model.priceCoins" :min="0" :max="100000" :precision="0" controls-position="right" />
-            <el-checkbox v-model="model.enabled" :disabled="!providerDraft.secretConfigured && !providerApiKey.trim() || model.priceCoins < 1 || !model.name.trim()" />
+            <el-checkbox v-model="model.enabled" />
             <el-button class="provider-delete-model" text type="danger" aria-label="删除模型" @click="removeProviderModel(index)"><Trash2 :size="15" /></el-button>
           </div>
         </div>
