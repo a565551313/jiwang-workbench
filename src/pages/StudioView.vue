@@ -8,7 +8,7 @@ import { makeDraft, themeGroups, titleForTopic } from '../lib/drafts'
 import { makeZip } from '../lib/archive'
 import { persistReference } from '../lib/repository'
 import { supabase, supabaseConfigured } from '../lib/supabase'
-import { generateStickers, loadEnabledImageModels, loadGenerationImages, loadGenerationStatus, loadWalletBalance, type PublicImageModel } from '../lib/generation'
+import { explainGenerationError, explainPreparationError, generateStickers, loadEnabledImageModels, loadGenerationImages, loadGenerationStatus, loadWalletBalance, type PublicImageModel } from '../lib/generation'
 import type { DraftCell, GenerationJob, GenerationOptions } from '../types'
 
 const router = useRouter()
@@ -29,12 +29,16 @@ const modelsLoading = ref(false)
 const models = ref<PublicImageModel[]>([])
 const selectedModelId = ref('')
 const walletBalance = ref(0)
+const balanceLoading = ref(false)
+const balanceLoadFailed = ref(false)
 const progress = ref(0)
 const progressText = ref('准备就绪')
+const failureMessage = ref('')
 const latestJob = ref<GenerationJob | null>(null)
 const options = reactive<GenerationOptions>({ originalStyle: true, noText: false, whiteBorder: true })
 let referenceUpload: Promise<string | undefined> | null = null
 let modelLoadSequence = 0
+let balanceLoadSequence = 0
 const modelLoadFailed = ref(false)
 const categories = computed(() => themeGroups.map((group) => group.label))
 const visibleThemes = computed(() => themeGroups.find((group) => group.label === activeCategory.value)?.themes ?? [])
@@ -47,7 +51,7 @@ function selectTheme(theme: string) {
   topic.value = theme
   draft.value = makeDraft(theme)
   generatedCells.value = []
-  latestJob.value = null
+  if (latestJob.value?.status !== 'processing' && latestJob.value?.status !== 'queued') latestJob.value = null
 }
 
 function useCustomDraft() {
@@ -57,7 +61,7 @@ function useCustomDraft() {
   topic.value = clean
   draft.value = makeDraft('日常精选')
   generatedCells.value = []
-  latestJob.value = null
+  if (latestJob.value?.status !== 'processing' && latestJob.value?.status !== 'queued') latestJob.value = null
   ElMessage.success('已生成 16 格草案，请检查或编辑每格文字')
 }
 
@@ -81,9 +85,22 @@ async function refreshModels() {
 }
 
 async function refreshBalance() {
-  if (!auth.user?.id) { walletBalance.value = 0; return }
-  try { walletBalance.value = await loadWalletBalance(auth.user.id) }
-  catch { walletBalance.value = 0 }
+  const requestId = ++balanceLoadSequence
+  if (!auth.user?.id) { walletBalance.value = 0; balanceLoadFailed.value = false; balanceLoading.value = false; return }
+  balanceLoading.value = true
+  balanceLoadFailed.value = false
+  try {
+    const balance = await loadWalletBalance(auth.user.id)
+    if (requestId === balanceLoadSequence) walletBalance.value = balance
+  }
+  catch (error) {
+    if (requestId === balanceLoadSequence) {
+      balanceLoadFailed.value = true
+      ElMessage.warning(explainPreparationError('汪币余额读取', error))
+    }
+  } finally {
+    if (requestId === balanceLoadSequence) balanceLoading.value = false
+  }
 }
 
 onMounted(() => {
@@ -112,7 +129,8 @@ function handleFileChange(event: Event) {
       if (selectedFile.value === selected) referenceStoragePath.value = path || ''
       return path
     }).catch((error: unknown) => {
-      ElMessage.warning(`预览可用，参考图云端保存失败：${error instanceof Error ? error.message : '请稍后重试'}`)
+      if (selectedFile.value === selected) referenceUpload = null
+      ElMessage.warning(`预览可用。${explainPreparationError('参考图云端保存', error)}`)
       return undefined
     })
   }
@@ -128,12 +146,16 @@ function removeFile() {
 }
 
 async function generate() {
-  if (!auth.user?.id || !supabaseConfigured || !supabase) { ElMessage.warning('真实生成和汪币结算需要先登录；请使用页面右上角登录 / 注册') ; return }
+  if (!auth.user?.id) { ElMessage.warning('真实生成和汪币结算需要先登录；请使用页面右上角登录 / 注册'); return }
+  if (!supabaseConfigured || !supabase) { ElMessage.error('云端生成服务尚未配置，当前不能提交任务或结算汪币；请联系项目管理员检查 Supabase 配置。'); return }
   if (!selectedFile.value || !referenceUrl.value) { ElMessage.warning('请先上传一张角色图'); return }
   if (!selectedModel.value) { ElMessage.warning('当前没有已启用的图像模型，请稍后再试或联系管理员'); return }
+  if (balanceLoading.value) { ElMessage.warning('正在读取汪币余额，请稍候'); return }
+  if (balanceLoadFailed.value) { ElMessage.warning('汪币余额暂时无法读取，请先重新读取余额，避免提交后无法确认费用'); return }
   if (walletBalance.value < generationCost.value) { ElMessage.warning(`汪币余额不足：本次需要 ${generationCost.value} 汪币，当前余额 ${walletBalance.value}`); return }
   if (draft.value.length !== 16 || draft.value.some((cell) => !cell.caption.trim() || !cell.visual.trim())) { ElMessage.warning('请为 16 格草案都填写短句和画面描述'); return }
   loading.value = true
+  failureMessage.value = ''
   generatedCells.value = []
   progress.value = 3
   progressText.value = '正在安全上传参考图并创建生成任务'
@@ -152,9 +174,9 @@ async function generate() {
   latestJob.value = job
   try {
     const referencePath = referenceStoragePath.value || await (referenceUpload || persistReference(selectedFile.value, auth.user.id))
-    if (!referencePath) throw new Error('参考图未能安全上传到云端，请稍后重试')
+    if (!referencePath) throw new Error('参考图未能保存到云端。请检查网络、登录状态和私有存储权限，确认上传成功后再开始生成。')
     referenceStoragePath.value = referencePath
-    progressText.value = `正在调用 ${model.name} 生成 16 张贴图；失败会自动退回汪币`
+    progressText.value = `正在调用 ${model.name} 生成 16 张贴图；失败时系统会尝试退款`
     const result = await generateStickers({
       jobId: job.id,
       modelId: model.id,
@@ -175,7 +197,9 @@ async function generate() {
   } catch (error) {
     const message = error instanceof Error ? error.message : '生成失败，请检查模型配置后重试'
     let remoteStatus: Awaited<ReturnType<typeof loadGenerationStatus>> = null
-    try { remoteStatus = await loadGenerationStatus(job.id) } catch { /* report the original request error */ }
+    let statusCheckFailed = false
+    try { remoteStatus = await loadGenerationStatus(job.id) }
+    catch { statusCheckFailed = true }
     if (remoteStatus?.status === 'completed') {
       const images = await loadGenerationImages(job.id, auth.user.id).catch(() => [])
       if (images.length === 16) {
@@ -186,20 +210,45 @@ async function generate() {
         await refreshBalance()
         ElMessage.success('16 张贴图已生成并同步')
       } else {
-        latestJob.value = { ...job, status: 'completed', progress: 100, finishedAt: new Date().toISOString(), assetCount: 16 }
+        failureMessage.value = '任务已完成，但当前无法读取图片预览。请打开任务历史或素材库查看；若仍看不到图片，请管理员检查私有存储桶和临时访问链接。'
+        latestJob.value = { ...job, status: 'completed', progress: 100, finishedAt: new Date().toISOString(), assetCount: 16, errorMessage: failureMessage.value }
         progressText.value = '任务已完成；打开任务历史或素材库查看图片'
-        ElMessage.warning('任务已完成，但当前无法读取预览，请稍后从素材库查看')
+        ElMessage.warning(failureMessage.value)
       }
     } else if (remoteStatus?.status === 'processing' || remoteStatus?.status === 'queued') {
       latestJob.value = { ...job, status: remoteStatus.status, progress: remoteStatus.progress }
       progress.value = Number(remoteStatus.progress || 3)
-      progressText.value = '云端任务仍在处理；请勿重复提交，稍后到任务历史查看'
-      ElMessage.warning('连接中断但云端任务仍在处理；请勿再次提交同一套生成')
-    } else {
-      latestJob.value = { ...job, status: 'failed', finishedAt: new Date().toISOString() }
-      progressText.value = '生成失败，若已预扣汪币系统会自动退回'
+      if (/严重提醒|退款记录已写入|失败\/退款状态/i.test(message)) {
+        failureMessage.value = explainGenerationError(message)
+        progressText.value = '请求已返回错误，但任务/退款状态尚未确认；请勿重复提交'
+        ElMessage.error(failureMessage.value.split('\n')[0] || '任务和退款状态尚未确认')
+      } else {
+        failureMessage.value = '浏览器与生成服务的连接中断，但云端任务仍在处理。请勿再次提交同一套生成；稍后刷新任务历史查看结果。'
+        progressText.value = '连接中断；云端仍在处理，请勿重复提交'
+        ElMessage.warning('连接中断，但云端任务仍在处理；请勿重复提交')
+      }
+      latestJob.value = { ...latestJob.value, errorMessage: failureMessage.value }
+    } else if (remoteStatus?.status === 'failed') {
+      failureMessage.value = explainGenerationError(remoteStatus.error_message || message)
+      latestJob.value = { ...job, status: 'failed', finishedAt: new Date().toISOString(), errorMessage: failureMessage.value }
+      progressText.value = '生成失败；请按下方原因排查并核对退款'
       await refreshBalance()
-      ElMessage.error(remoteStatus?.error_message || message)
+      ElMessage.error(failureMessage.value.split('\n')[0] || '生成失败')
+    } else {
+      if (statusCheckFailed) {
+        failureMessage.value = `${explainGenerationError(message)}\n\n另外，当前无法查询云端任务状态，因此也无法确认是否已预扣或退款。请勿立即重复提交；检查网络后刷新任务历史和余额。`
+      } else {
+        failureMessage.value = `${explainGenerationError(message)}\n\n当前没有查到这次任务记录，扣费状态尚不能仅凭此页面确认。请刷新任务历史和余额；确认没有同一任务在处理后再重试。`
+      }
+      latestJob.value = {
+        ...job,
+        status: statusCheckFailed || !remoteStatus ? 'processing' : 'failed',
+        finishedAt: statusCheckFailed || !remoteStatus ? undefined : new Date().toISOString(),
+        errorMessage: failureMessage.value,
+      }
+      progressText.value = statusCheckFailed ? '无法确认云端任务状态；请先核对任务历史与余额' : '未查到任务记录；请先确认扣费状态'
+      await refreshBalance()
+      ElMessage.error(failureMessage.value.split('\n')[0] || '生成失败')
     }
   } finally {
     loading.value = false
@@ -239,7 +288,7 @@ onBeforeUnmount(() => {
       <div class="intro-badge"><span class="intro-badge-dot"></span>创作工坊 <span class="badge-divider"></span> 16 格</div>
     </section>
 
-    <div class="prototype-banner"><span class="banner-icon"><WandSparkles :size="17" /></span><span><strong>真实模型生成</strong> 选择已启用的图像模型后，系统会显示本套价格并在服务端安全结算；生成失败会自动退回汪币。</span></div>
+    <div class="prototype-banner"><span class="banner-icon"><WandSparkles :size="17" /></span><span><strong>真实模型生成</strong> 选择已启用的图像模型后，系统会显示本套价格并在服务端安全结算；失败时系统会尝试退款，退款是否到账以任务历史和余额为准。</span></div>
 
     <div class="studio-layout">
       <div class="studio-form-column">
@@ -301,10 +350,10 @@ onBeforeUnmount(() => {
               </el-option>
             </el-select>
             <div class="model-price-summary"><span><Coins :size="15" />本套 16 张贴图</span><strong>{{ generationCost }} <small>汪币</small></strong></div>
-            <div class="wallet-summary"><span>当前余额</span><strong v-if="auth.user">{{ walletBalance }} 汪币</strong><strong v-else>登录后查看</strong><span v-if="auth.user && walletBalance < generationCost" class="wallet-short">余额不足</span></div>
+            <div class="wallet-summary"><span>当前余额</span><strong v-if="balanceLoading">正在读取…</strong><strong v-else-if="balanceLoadFailed">暂时无法读取</strong><strong v-else-if="auth.user">{{ walletBalance }} 汪币</strong><strong v-else>登录后查看</strong><span v-if="auth.user && !balanceLoading && !balanceLoadFailed && walletBalance < generationCost" class="wallet-short">余额不足</span><button v-if="auth.user && balanceLoadFailed" type="button" class="text-action balance-retry" @click="refreshBalance">重新读取余额</button></div>
           </template>
-          <div v-else-if="modelLoadFailed" class="model-empty">暂时无法读取模型列表，请检查网络后重试。<button type="button" class="text-action" @click="refreshModels">重试读取</button></div>
-          <div v-else class="model-empty">目前没有已启用的可用模型；请管理员确认模型已配置密钥、设置汪币价格并启用。</div>
+          <div v-else-if="modelLoadFailed" class="model-empty">暂时无法读取模型列表。请检查网络、Supabase RPC 和登录/匿名读取权限后重试。<button type="button" class="text-action" @click="refreshModels">重试读取</button></div>
+          <div v-else class="model-empty">目前没有已启用的可用模型。请管理员确认供应商已保存 API Key、模型 ID 和 1–100000 整数价格，且模型已启用；检查 public_enabled_image_models RPC 权限及数据库迁移。</div>
           <div v-if="!auth.user" class="model-login-note">真实生成需要登录账号；请先使用页面右上角“登录 / 注册”。</div>
         </section>
       </div>
@@ -321,12 +370,13 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="loading || latestJob" class="generation-status">
-            <div class="generation-status-top"><span><LoaderCircle v-if="loading" class="spin" :size="15" /><Check v-else-if="latestJob?.status === 'completed'" :size="15" /><Clock3 v-else :size="15" />{{ progressText }}</span><strong>{{ progress }}%</strong></div>
+            <div class="generation-status-top"><span><LoaderCircle v-if="loading" class="spin" :size="15" /><Check v-else-if="latestJob?.status === 'completed'" :size="15" /><X v-else-if="latestJob?.status === 'failed'" :size="15" /><Clock3 v-else :size="15" />{{ progressText }}</span><strong>{{ progress }}%</strong></div>
             <el-progress :percentage="progress" :show-text="false" :stroke-width="5" color="#4f86e8" />
+            <div v-if="failureMessage" class="generation-error" role="alert">{{ failureMessage }}</div>
           </div>
-          <el-button v-if="generatedCells.length !== 16" class="primary-button generate-button" type="primary" :loading="loading" :disabled="modelsLoading || !selectedModel || !auth.user || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在生成并结算…' : modelsLoading ? '正在读取模型…' : modelLoadFailed ? '模型列表暂不可用' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
+          <el-button v-if="generatedCells.length !== 16" class="primary-button generate-button" type="primary" :loading="loading" :disabled="modelsLoading || !selectedModel || !auth.user || balanceLoading || balanceLoadFailed || walletBalance < generationCost || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在生成并结算…' : modelsLoading ? '正在读取模型…' : modelLoadFailed ? '模型列表暂不可用' : balanceLoading ? '正在读取余额…' : balanceLoadFailed ? '请先重新读取余额' : !auth.user ? '请先登录' : walletBalance < generationCost ? '汪币余额不足' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
           <div v-else class="result-actions"><el-button class="primary-button" type="primary" :loading="zipLoading" @click="downloadZip"><Download :size="16" />下载 16 张 PNG</el-button><el-button class="text-result-button" @click="router.push('/assets')">打开素材库</el-button></div>
-          <div class="preview-footnote"><span class="tiny-info">i</span><span>模型在服务端调用；图片保存在账号私有素材库，生成请求失败会退回已预扣汪币。</span></div>
+          <div class="preview-footnote"><span class="tiny-info">i</span><span>模型在服务端调用；图片保存在账号私有素材库。失败时系统会尝试退回已预扣汪币，请以任务历史和余额确认退款状态。</span></div>
         </section>
         <section class="next-step-card"><div class="next-step-icon"><WandSparkles :size="17" /></div><div><strong>下一步可以做什么？</strong><p>检查 16 格短句，选择模型并确认价格后开始生成。</p><button @click="router.push('/history')">查看任务历史 <ArrowRight :size="14" /></button></div></section>
       </aside>

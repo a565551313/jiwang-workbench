@@ -21,6 +21,7 @@ export interface AdminJob {
   createdAt: string
   finishedAt?: string
   assetCount: number
+  errorMessage?: string
 }
 
 export interface AdminMetrics {
@@ -124,6 +125,7 @@ function sampleJobs(): AdminJob[] {
     createdAt: job.createdAt,
     finishedAt: job.finishedAt,
     assetCount: job.assetCount ?? 16,
+    errorMessage: job.errorMessage,
   }))
   const now = Date.now()
   const seeded: GenerationJob[] = [
@@ -228,6 +230,10 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
   const metricsRaw = (metricsResult.data || {}) as Record<string, number>
   const users = (usersResult.data || []) as Array<{ user_id: string; email: string | null; display_name: string | null; created_at: string; coins: number; total_count: number }>
   const jobs = (jobsResult.data || []) as Array<{ job_id: string; user_email: string | null; title: string; topic: string; status: GenerationJob['status']; created_at: string; finished_at: string | null; asset_count: number | null; model_name?: string | null; price_coins?: number | null }>
+  const jobErrorsResult = jobs.length
+    ? await supabase.from('generation_jobs').select('id,error_message').in('id', jobs.map((job) => job.job_id))
+    : { data: [], error: null }
+  const jobErrors = new Map(((jobErrorsResult.data || []) as Array<{ id: string; error_message: string | null }>).map((row) => [row.id, row.error_message || undefined]))
   const settingsRows = (settingsResult.data || []) as Array<{ setting_key: string; value: unknown }>
   const modelValue = settingsRows.find((row) => row.setting_key === 'model')?.value
   const providerModelSchemaReady = Boolean(modelValue && typeof modelValue === 'object' && Array.isArray((modelValue as Record<string, unknown>).providers))
@@ -242,7 +248,7 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
       coinsInCirculation: Number(metricsRaw.coins_in_circulation || 0),
     },
     users: users.map((user) => ({ userId: user.user_id, email: user.email || '—', displayName: user.display_name || '极汪用户', createdAt: user.created_at, coins: Number(user.coins || 0), totalCount: Number(user.total_count || 0) })),
-    jobs: jobs.map((job) => ({ jobId: job.job_id, userEmail: job.user_email || '—', title: job.title, topic: job.topic, status: job.status, modelName: job.model_name || undefined, priceCoins: job.price_coins ?? undefined, createdAt: job.created_at, finishedAt: job.finished_at || undefined, assetCount: Number(job.asset_count || 0) })),
+    jobs: jobs.map((job) => ({ jobId: job.job_id, userEmail: job.user_email || '—', title: job.title, topic: job.topic, status: job.status, modelName: job.model_name || undefined, priceCoins: job.price_coins ?? undefined, createdAt: job.created_at, finishedAt: job.finished_at || undefined, assetCount: Number(job.asset_count || 0), errorMessage: jobErrors.get(job.job_id) })),
     settings: normalizeSettings(settingsRows),
     providerModelSchemaReady,
   }
@@ -311,7 +317,18 @@ export async function requeueAdminJob(jobId: string, demo: boolean) {
     return
   }
   const { error } = await supabase.functions.invoke('jiwang-generate', { body: { action: 'retry', jobId } })
-  if (error) throw new Error(error.message)
+  if (error) {
+    let message = error.message
+    const context = (error as { context?: unknown }).context
+    if (context instanceof Response) {
+      try {
+        const body = await context.clone().json() as { error?: unknown; message?: unknown }
+        if (typeof body.error === 'string') message = body.error
+        else if (typeof body.message === 'string') message = body.message
+      } catch { /* Retain the SDK message when the response is not JSON. */ }
+    }
+    throw new Error(message || '任务重试失败，请检查任务记录、模型配置和退款状态')
+  }
 }
 
 export async function adjustAdminWallet(userId: string, delta: number, note: string, demo: boolean) {

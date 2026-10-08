@@ -49,7 +49,7 @@ async function signOut() {
       <div class="sidebar-spacer"></div>
       <div class="provider-card">
         <div class="provider-card-top"><span class="live-dot"></span><span>云端模型创作</span><Sparkles :size="15" /></div>
-        <p>从已启用模型中选择；开始前显示价格，失败自动退回汪币。</p>
+        <p>从已启用模型中选择；开始前显示价格，失败时会尝试退款，请核对任务和余额。</p>
       </div>
       <div class="sidebar-bottom">
         <div class="side-user" v-if="auth.isSignedIn">

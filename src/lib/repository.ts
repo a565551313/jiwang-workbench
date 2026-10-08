@@ -53,8 +53,9 @@ export async function fetchAssets(userId?: string): Promise<WorkAsset[]> {
 export async function fetchJobs(userId?: string): Promise<GenerationJob[]> {
   if (supabase && supabaseConfigured && userId) {
     const { data, error } = await supabase.from('generation_jobs').select('*').order('created_at', { ascending: false }).limit(80)
-    if (!error && data) {
-      return (data as Array<{ id: string; title: string; topic: string; status: GenerationJob['status']; created_at: string; finished_at: string | null; options: { cellCount?: number }; model_id?: string | null; model_name?: string | null; price_coins?: number | null; progress?: number }>).map((row) => ({
+    if (error) throw new Error(error.message)
+    if (data) {
+      return (data as Array<{ id: string; title: string; topic: string; status: GenerationJob['status']; created_at: string; finished_at: string | null; options: { cellCount?: number }; model_id?: string | null; model_name?: string | null; price_coins?: number | null; progress?: number; error_message?: string | null }>).map((row) => ({
         id: row.id,
         title: row.title,
         topic: row.topic,
@@ -66,8 +67,10 @@ export async function fetchJobs(userId?: string): Promise<GenerationJob[]> {
         createdAt: row.created_at,
         finishedAt: row.finished_at || undefined,
         assetCount: row.options?.cellCount,
+        errorMessage: row.error_message || undefined,
       }))
     }
+    return []
   }
   return readJson<GenerationJob[]>(JOBS_KEY, [])
 }

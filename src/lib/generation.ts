@@ -24,6 +24,67 @@ export interface StickerGenerationResult {
   priceCoins?: number
 }
 
+/** Turn transport, upstream and legacy server errors into actionable Chinese guidance. */
+export function explainGenerationError(value: unknown): string {
+  const raw = typeof value === 'string'
+    ? value
+    : value instanceof Error
+      ? value.message
+      : value && typeof value === 'object' && 'message' in value
+        ? String((value as { message?: unknown }).message ?? '')
+        : ''
+  const message = raw.trim() || '发生了未识别的生成错误'
+  const lower = message.toLowerCase()
+  if (/建议[:：]/.test(message)) return message
+
+  const upstreamProtocol = /responses api/i.test(message) ? 'Responses API' : /chat completions/i.test(message) ? 'Chat Completions' : '上游模型接口'
+  const status = message.match(/(?:http\s*)?\(?([45]\d\d)\)?/i)?.[1]
+  if (status === '403') {
+    return `${upstreamProtocol} 返回 HTTP 403，说明上游拒绝了这次请求。常见原因是 API Key 无权调用该模型、账户/区域策略限制，或所选协议与供应商实现不兼容。\n建议：请管理员核对供应商协议、Base URL、模型 ID 与 API Key 权限；核实前不要连续重复提交。若任务已失败，请刷新余额和任务历史确认退款状态。`
+  }
+  if (status === '401') {
+    return `${upstreamProtocol} 返回 HTTP 401，API Key 无效、过期或未被该接口接受。\n建议：请管理员重新核对并保存供应商 API Key，再确认模型启用状态；失败任务的汪币退款请以余额和任务历史为准。`
+  }
+  if (status === '404') {
+    return `${upstreamProtocol} 返回 HTTP 404，接口路径或模型 ID 未找到。\n建议：请管理员核对 Base URL 是否包含正确的 API 前缀、协议类型和模型 ID。`
+  }
+  if (status === '429') {
+    return `${upstreamProtocol} 返回 HTTP 429，供应商限流或额度暂不可用。\n建议：稍后再试，并请管理员检查上游速率限制、并发额度和账户配额；不要短时间连续提交。`
+  }
+  if (status && Number(status) >= 500) {
+    return `${upstreamProtocol} 返回 HTTP ${status}，供应商服务暂时异常。\n建议：稍后重试，并请管理员检查供应商状态；先在任务历史与余额中确认本次任务和退款状态。`
+  }
+  if (/aborterror|timed?\s*out|timeout|超时/i.test(message)) {
+    return `${message}\n建议：请求超时可能是上游处理慢或网络中断。请先刷新任务历史确认云端任务是否仍在处理，不要立即重复提交。`
+  }
+  if (/failed to fetch|fetch failed|networkerror|network request failed|load failed/i.test(lower)) {
+    return '无法连接生成服务或上游模型，可能是网络、DNS、TLS 或服务暂时不可用。\n建议：检查网络后刷新页面和任务历史；确认任务状态与余额后再决定是否重试。'
+  }
+  if (/insufficient wallet balance|汪币余额不足/i.test(message)) {
+    return '汪币余额不足，本次模型调用未开始。\n建议：刷新余额，选择价格更低的已启用模型，或先补充汪币。'
+  }
+  return `${message}\n建议：先刷新任务历史与汪币余额，确认任务状态和退款结果后再重试；若仍失败，请把完整错误和任务编号提供给项目管理员。`
+}
+
+export function explainPreparationError(stage: '参考图云端保存' | '汪币余额读取', value: unknown): string {
+  const message = value instanceof Error ? value.message : typeof value === 'string' ? value : ''
+  const detail = message.trim() || '未知服务错误'
+  const lower = detail.toLowerCase()
+  if (/failed to fetch|fetch failed|networkerror|network request failed|load failed/i.test(lower)) {
+    return `${stage}失败，当前无法连接云端服务。请检查网络后重试；这一步尚未开始模型调用。`
+  }
+  if (/401|403|row.level security|permission|unauthorized/i.test(detail)) {
+    return `${stage}失败，当前账号会话或云端权限不足。请重新登录；若仍失败，请管理员检查 Supabase Storage/RLS 策略。`
+  }
+  if (/404|bucket.*not found|not found/i.test(detail)) {
+    return `${stage}失败，云端存储桶或数据资源不存在。请管理员检查 jiwang-private 存储桶及数据库迁移。`
+  }
+  if (/413|too large|payload/i.test(detail)) {
+    return `${stage}失败，图片或请求超过服务限制。请换用不超过 12 MB 的 PNG、JPG 或 WebP 图片。`
+  }
+  return `${stage}失败：${detail}\n建议：检查网络和登录状态后重试；如持续发生，请管理员检查 Supabase 存储/数据库权限与服务状态。`
+}
+
 let enabledImageModelsRequest: Promise<PublicImageModel[]> | null = null
 
 export function loadEnabledImageModels(): Promise<PublicImageModel[]> {

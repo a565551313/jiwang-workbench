@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Check, Clock3, History, LoaderCircle, RefreshCw, WandSparkles, X } from '@lucide/vue'
 import { fetchJobs } from '../lib/repository'
+import { explainGenerationError } from '../lib/generation'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
 import type { GenerationJob } from '../types'
@@ -11,11 +12,17 @@ const router = useRouter()
 const auth = useAuthStore()
 const jobs = ref<GenerationJob[]>([])
 const loading = ref(true)
+const loadError = ref('')
 const completedCount = computed(() => jobs.value.filter((job) => job.status === 'completed').length)
 const sourceLabel = computed(() => auth.user?.id && supabaseConfigured ? '账号云端记录' : '本机演示记录')
 async function load() {
   loading.value = true
+  loadError.value = ''
   try { jobs.value = await fetchJobs(auth.user?.id) }
+  catch (error) {
+    jobs.value = []
+    loadError.value = `任务历史加载失败：${error instanceof Error ? error.message : '云端暂时不可用'}。请检查网络和登录状态后重试；在任务状态可见前，不能据此确认退款已到账。`
+  }
   finally { loading.value = false }
 }
 function dateLabel(value: string) {
@@ -34,13 +41,14 @@ watch(() => auth.user?.id, () => { void load() })
       <div><div class="eyebrow">CREATION HISTORY</div><h1>生成记录</h1><p>查看你的表情套装生成流水与当前状态。</p></div>
       <el-button class="soft-button" @click="load"><RefreshCw :size="14" />刷新记录</el-button>
     </div>
-    <el-alert class="subtle-alert" type="info" :closable="false" show-icon>{{ sourceLabel }} · 生成由服务端模型处理；失败任务会自动退回已预扣汪币。</el-alert>
+    <el-alert class="subtle-alert" type="info" :closable="false" show-icon>{{ sourceLabel }} · 生成由服务端模型处理；失败时系统会尝试退回已预扣汪币，请以余额和退款记录为准。</el-alert>
+    <el-alert v-if="loadError" class="subtle-alert" type="error" :closable="false" show-icon>{{ loadError }} <el-button link type="primary" @click="load">重试读取</el-button></el-alert>
     <div class="assets-toolbar"><div class="asset-count"><strong>{{ jobs.length }}</strong>条任务 <span>· 已完成 {{ completedCount }} 条</span></div></div>
     <div v-if="loading" class="empty-state"><div class="empty-state-inner"><LoaderCircle class="spin" :size="28" color="#3977d4" /><p>正在加载任务…</p></div></div>
     <div v-else-if="jobs.length" class="history-list">
       <article v-for="job in jobs" :key="job.id" class="history-row">
         <div class="history-icon"><WandSparkles :size="18" /></div>
-        <div class="history-info"><strong>{{ job.title }}</strong><p>{{ job.topic || '日常聊天' }} <span>·</span> {{ job.assetCount || 16 }} 格 <template v-if="job.modelName"><span>·</span> {{ job.modelName }}</template><template v-if="job.priceCoins"><span>·</span> {{ job.priceCoins }} 汪币</template> <span>·</span> {{ sourceLabel }}</p></div>
+        <div class="history-info"><strong>{{ job.title }}</strong><p>{{ job.topic || '日常聊天' }} <span>·</span> {{ job.assetCount || 16 }} 格 <template v-if="job.modelName"><span>·</span> {{ job.modelName }}</template><template v-if="job.priceCoins"><span>·</span> {{ job.priceCoins }} 汪币</template> <span>·</span> {{ sourceLabel }}</p><p v-if="job.status === 'failed' && job.errorMessage" class="history-error">{{ explainGenerationError(job.errorMessage) }}</p></div>
         <div class="history-status" :class="{ failed: job.status === 'failed' }"><Check v-if="job.status === 'completed'" :size="12" /><X v-else-if="job.status === 'failed'" :size="12" /><Clock3 v-else :size="12" />{{ statusLabel(job.status) }}</div>
         <time class="history-date">{{ dateLabel(job.finishedAt || job.createdAt) }}</time>
       </article>

@@ -64,6 +64,81 @@ function safeText(value: unknown, maxLength: number, fallback = ""): string {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : fallback;
 }
 
+function safeUpstreamDetail(body: string, apiKey: string): string {
+  if (!body) return "";
+  let detail = "";
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const error = parsed.error && typeof parsed.error === "object" ? parsed.error as Record<string, unknown> : {};
+    detail = safeText(error.message, 400) || safeText(parsed.message, 400);
+  } catch {
+    if (!/<html[\s>]/i.test(body)) detail = body.replace(/[\r\n\t]+/g, " ").slice(0, 240);
+  }
+  return (apiKey ? detail.replaceAll(apiKey, "[凭据已隐藏]") : detail)
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [凭据已隐藏]")
+    .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/gi, "[凭据已隐藏]")
+    .replace(/[\r\n\t]+/g, " ")
+    .slice(0, 240);
+}
+
+function upstreamErrorMessage(protocol: string, status: number, detail = ""): string {
+  const api = `${protocol} 上游接口`;
+  let reason: string;
+  let action: string;
+  if (status === 400) {
+    reason = `${api} 返回 HTTP 400，请求参数不被接受。`;
+    action = "请管理员核对协议、模型 ID 以及供应商支持的图像输入/输出参数。";
+  } else if (status === 401) {
+    reason = `${api} 返回 HTTP 401，API Key 无效、过期或未被该接口接受。`;
+    action = "请管理员重新核对并保存供应商 API Key，并确认密钥属于正确账户。";
+  } else if (status === 402) {
+    reason = `${api} 返回 HTTP 402，上游账户额度或付款状态不足。`;
+    action = "请管理员检查供应商账户余额、配额和计费状态。";
+  } else if (status === 403) {
+    reason = `${api} 返回 HTTP 403，上游拒绝了这次请求。常见原因包括 API Key 无权调用该模型、账户/区域策略限制，或供应商不支持当前协议的图像生成方式。`;
+    action = "请管理员逐项核对供应商协议、Base URL、模型 ID 与 API Key 权限；确认前不要连续重复提交。";
+  } else if (status === 404) {
+    reason = `${api} 返回 HTTP 404，接口路径或模型 ID 未找到。`;
+    action = "请管理员核对 Base URL 是否含正确 API 前缀、协议类型与模型 ID。";
+  } else if (status === 408 || status === 504) {
+    reason = `${api} 返回 HTTP ${status}，上游处理超时。`;
+    action = "请先在任务历史确认云端状态，稍后再试；不要短时间重复提交。";
+  } else if (status === 413) {
+    reason = `${api} 返回 HTTP 413，请求内容超过上游限制。`;
+    action = "请换用更小的参考图（当前上限 12 MB），并让管理员检查供应商的请求体限制。";
+  } else if (status === 415) {
+    reason = `${api} 返回 HTTP 415，上游不接受当前请求或图片格式。`;
+    action = "请管理员确认该协议支持图像输入与图像生成，并核对供应商要求的图片格式。";
+  } else if (status === 422) {
+    reason = `${api} 返回 HTTP 422，模型不接受本次参数或输入格式。`;
+    action = "请管理员核对模型 ID、协议及该模型支持的图像生成参数。";
+  } else if (status === 429) {
+    reason = `${api} 返回 HTTP 429，供应商限流或配额暂不可用。`;
+    action = "请稍后重试，并让管理员检查上游并发限制、速率限制和账户配额。";
+  } else if (status >= 500) {
+    reason = `${api} 返回 HTTP ${status}，供应商服务暂时异常。`;
+    action = "请稍后重试，并让管理员检查供应商服务状态。";
+  } else {
+    reason = `${api} 返回 HTTP ${status}，上游未接受生成请求。`;
+    action = "请管理员检查供应商配置和服务状态。";
+  }
+  const upstreamNote = detail ? `\n上游说明：${detail}` : "";
+  return `${reason}${upstreamNote}\n建议：${action} 如本任务已经预扣汪币，系统会尝试自动退回；请以任务历史和余额为准，未到账时联系管理员核对退款记录。`;
+}
+
+function upstreamNetworkError(protocol: string, cause: unknown): Error {
+  const name = cause && typeof cause === "object" && "name" in cause ? String((cause as Record<string, unknown>).name) : "";
+  if (name === "AbortError" || name === "TimeoutError") {
+    return new Error(`${protocol} 上游请求超过 40 秒仍未响应，已超时。\n建议：请先查看任务历史确认云端状态，稍后再试；如已预扣汪币，系统会尝试自动退回，请刷新余额确认。`);
+  }
+  return new Error(`连接 ${protocol} 上游失败，可能是 Base URL、DNS、TLS、代理或供应商网络异常。\n建议：请管理员核对 HTTPS Base URL 和网络连通性；先查看任务历史及余额确认本次状态，不要立即重复提交。`);
+}
+
+async function responseFailure(response: Response, protocol: string, apiKey: string): Promise<Error> {
+  const body = await response.text().catch(() => "");
+  return new Error(upstreamErrorMessage(protocol, response.status, safeUpstreamDetail(body, apiKey)));
+}
+
 function validateCells(value: unknown): DraftCell[] | null {
   if (!Array.isArray(value) || value.length !== 16) return null;
   const cells: DraftCell[] = [];
@@ -80,7 +155,9 @@ function validateCells(value: unknown): DraftCell[] | null {
 
 function safeEndpoint(value: string): string {
   const raw = value.trim() || "https://api.openai.com/v1";
-  const parsed = new URL(raw);
+  let parsed: URL;
+  try { parsed = new URL(raw); }
+  catch { throw new Error("模型 API Base URL 格式无效；请填写完整的 HTTPS 地址，例如 https://api.example.com/v1"); }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error("模型 API Base URL 必须是干净的 HTTPS 地址");
   }
@@ -132,7 +209,9 @@ function isNonPublicAddress(host: string): boolean {
 async function imageFromResponse(data: Record<string, unknown>): Promise<ImagePayload> {
   const encoded = typeof data.b64_json === "string" ? data.b64_json : data.result;
   if (typeof encoded === "string" && encoded.length > 0) {
-    const bytes = bytesFromBase64(encoded);
+    let bytes: Uint8Array;
+    try { bytes = bytesFromBase64(encoded); }
+    catch { throw new Error("模型返回的图片数据不是有效的 Base64 编码；请管理员检查供应商响应格式"); }
     if (bytes.byteLength === 0 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("模型返回的单张图为空或超过 10 MB 限制");
     const contentType = typeof data.content_type === "string" && /^image\/(png|jpeg|webp)$/.test(data.content_type) ? data.content_type : "image/png";
     return { bytes, contentType };
@@ -142,11 +221,20 @@ async function imageFromResponse(data: Record<string, unknown>): Promise<ImagePa
   if (typeof urlText === "string") {
     const dataUrl = urlText.match(/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/);
     if (dataUrl) return await imageFromResponse({ b64_json: dataUrl[2], content_type: dataUrl[1] });
-    const imageUrl = new URL(urlText);
+    let imageUrl: URL;
+    try { imageUrl = new URL(urlText); }
+    catch { throw new Error("模型返回的图片地址格式无效；请管理员检查供应商响应格式"); }
     if (imageUrl.protocol !== "https:" || isNonPublicAddress(imageUrl.hostname)) throw new Error("模型返回了不安全的图片地址");
-    const response = await fetch(imageUrl, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+    let response: Response;
+    try { response = await fetch(imageUrl, { redirect: "error", signal: AbortSignal.timeout(15_000) }); }
+    catch (cause) {
+      const name = cause && typeof cause === "object" && "name" in cause ? String((cause as Record<string, unknown>).name) : "";
+      if (name === "AbortError" || name === "TimeoutError") throw new Error("下载上游生成图片超过 15 秒，图片链接可能已过期或网络超时；请稍后重试");
+      throw new Error("无法下载上游返回的图片，可能是临时图片链接失效或网络中断；请管理员检查供应商输出方式");
+    }
     const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() || "";
-    if (!response.ok || !["image/png", "image/jpeg", "image/webp"].includes(contentType)) throw new Error("模型返回了不支持的图片格式");
+    if (!response.ok) throw new Error(`下载上游图片失败（HTTP ${response.status}）；图片链接可能失效或被供应商拒绝`);
+    if (!["image/png", "image/jpeg", "image/webp"].includes(contentType)) throw new Error(`模型返回的内容不是支持的 PNG、JPEG 或 WebP 图片（收到 ${contentType || "未知格式"}）`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength === 0 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("模型返回的图片为空或超过 10 MB 限制");
     return { bytes, contentType };
@@ -162,7 +250,7 @@ function base64FromBytes(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-async function imageFromChatCompletion(payload: Record<string, unknown>): Promise<ImagePayload> {
+async function imageFromChatCompletion(payload: Record<string, unknown>, apiKey: string): Promise<ImagePayload> {
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
   const choice = choices.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
   const message = choice?.message && typeof choice.message === "object" ? choice.message as Record<string, unknown> : {};
@@ -183,8 +271,10 @@ async function imageFromChatCompletion(payload: Record<string, unknown>): Promis
       }
     }
   }
+  let candidateError: unknown;
   for (const candidate of imageCandidates) {
-    try { return await imageFromResponse(candidate); } catch { /* Try the next advertised image candidate. */ }
+    try { return await imageFromResponse(candidate); }
+    catch (cause) { candidateError = cause; }
   }
   if (typeof message.content === "string") {
     const dataUrl = message.content.match(/data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+/);
@@ -196,30 +286,40 @@ async function imageFromChatCompletion(payload: Record<string, unknown>): Promis
   const rows = Array.isArray(payload.data) ? payload.data : [];
   const first = rows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
   if (first) return await imageFromResponse(first);
-  throw new Error("Chat Completions 未返回可用图像；请确认该上游模型支持图像输出");
+  if (candidateError instanceof Error) throw new Error(`Chat Completions 返回了图片字段，但读取失败：${candidateError.message}`);
+  const refusal = safeText(message.refusal, 300);
+  const textParts = Array.isArray(message.content)
+    ? message.content.flatMap((part) => part && typeof part === "object" ? [safeText((part as Record<string, unknown>).text, 300)] : []).filter(Boolean)
+    : [];
+  const text = typeof message.content === "string" ? message.content : textParts.join(" ");
+  const note = safeUpstreamDetail(JSON.stringify({ message: refusal || text }), apiKey);
+  throw new Error(`Chat Completions 未返回可用图像；上游可能拒绝了请求、只返回了文字，或所选模型不支持图像输出${note ? `（上游说明：${note}）` : ""}。请管理员确认该模型的图像输入/输出能力、内容策略和响应格式。`);
 }
 
 async function callImageModel(endpoint: string, apiKey: string, model: ModelConfig, reference: Blob, prompt: string): Promise<ImagePayload> {
   const referenceUrl = `data:${reference.type || "image/png"};base64,${base64FromBytes(new Uint8Array(await reference.arrayBuffer()))}`;
   if (model.protocol === "responses") {
-    const response = await fetch(`${endpoint}/responses`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: model.name,
-        input: [{ role: "user", content: [
-          { type: "input_text", text: prompt },
-          { type: "input_image", image_url: referenceUrl, detail: "high" },
-        ] }],
-        tools: [{ type: "image_generation", model: model.name, action: "edit", size: "1024x1024", background: "transparent" }],
-        tool_choice: { type: "image_generation" },
-      }),
-      redirect: "error",
-      signal: AbortSignal.timeout(40_000),
-    });
-    if (!response.ok) throw new Error(`Responses API 请求失败（${response.status}）；请检查协议及模型 ID`);
+    let response: Response;
+    try {
+      response = await fetch(`${endpoint}/responses`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: model.name,
+          input: [{ role: "user", content: [
+            { type: "input_text", text: prompt },
+            { type: "input_image", image_url: referenceUrl, detail: "high" },
+          ] }],
+          tools: [{ type: "image_generation", model: model.name, action: "edit", size: "1024x1024", background: "transparent" }],
+          tool_choice: { type: "image_generation" },
+        }),
+        redirect: "error",
+        signal: AbortSignal.timeout(40_000),
+      });
+    } catch (cause) { throw upstreamNetworkError("Responses API", cause); }
+    if (!response.ok) throw await responseFailure(response, "Responses API", apiKey);
     let payload: unknown;
-    try { payload = await response.json(); } catch { throw new Error("Responses API 返回的不是有效 JSON"); }
+    try { payload = await response.json(); } catch { throw new Error("Responses API 返回的不是有效 JSON（可能是代理错误页或供应商响应格式不兼容）。请管理员检查接口地址和协议。"); }
     const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
     const output = Array.isArray(root.output) ? root.output : [];
     const imageCall = output.find((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "image_generation_call") as Record<string, unknown> | undefined;
@@ -227,27 +327,50 @@ async function callImageModel(endpoint: string, apiKey: string, model: ModelConf
     const dataRows = Array.isArray(root.data) ? root.data : [];
     const first = dataRows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
     if (first) return await imageFromResponse(first);
-    throw new Error("Responses API 未返回图像结果");
+    const responseError = typeof root.error === "string"
+      ? safeText(root.error, 300)
+      : root.error && typeof root.error === "object"
+        ? safeText((root.error as Record<string, unknown>).message, 300)
+        : "";
+    const incomplete = root.incomplete_details && typeof root.incomplete_details === "object"
+      ? safeText((root.incomplete_details as Record<string, unknown>).reason, 160)
+      : "";
+    const textOutputs = output.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as Record<string, unknown>;
+      const content = Array.isArray(row.content) ? row.content : [];
+      return content.flatMap((part) => {
+        if (!part || typeof part !== "object") return [];
+        const value = part as Record<string, unknown>;
+        return value.type === "refusal" || value.type === "output_text" ? [safeText(value.refusal || value.text, 300)] : [];
+      });
+    }).filter(Boolean).join(" ");
+    const outputNote = textOutputs ? safeUpstreamDetail(JSON.stringify({ message: textOutputs }), apiKey) : "";
+    const detail = responseError || incomplete || outputNote;
+    throw new Error(`Responses API 请求已响应，但未返回可用图片结果${detail ? `（上游说明：${detail}）` : ""}。请管理员确认该模型支持 image_generation 工具，并检查内容策略或响应格式。`);
   }
 
-  const response = await fetch(`${endpoint}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: model.name,
-      messages: [{ role: "user", content: [
-        { type: "text", text: prompt },
-        { type: "image_url", image_url: { url: referenceUrl, detail: "high" } },
-      ] }],
-    }),
-    redirect: "error",
-    signal: AbortSignal.timeout(40_000),
-  });
-  if (!response.ok) throw new Error(`Chat Completions 请求失败（${response.status}）；请检查协议及模型 ID`);
+  let response: Response;
+  try {
+    response = await fetch(`${endpoint}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model.name,
+        messages: [{ role: "user", content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: referenceUrl, detail: "high" } },
+        ] }],
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(40_000),
+    });
+  } catch (cause) { throw upstreamNetworkError("Chat Completions", cause); }
+  if (!response.ok) throw await responseFailure(response, "Chat Completions", apiKey);
   let payload: unknown;
-  try { payload = await response.json(); } catch { throw new Error("Chat Completions 返回的不是有效 JSON"); }
+  try { payload = await response.json(); } catch { throw new Error("Chat Completions 返回的不是有效 JSON（可能是代理错误页或供应商响应格式不兼容）。请管理员检查接口地址和协议。"); }
   const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-  return await imageFromChatCompletion(root);
+  return await imageFromChatCompletion(root, apiKey);
 }
 
 function extensionFor(contentType: string): string {
@@ -276,12 +399,19 @@ async function signedImages(admin: SupabaseClient, jobId: string) {
 
 async function failJob(admin: SupabaseClient, jobId: string, workerToken: string, error: unknown, uploadedPaths: string[]) {
   const message = error instanceof Error ? error.message : "图像生成失败";
-  await admin.rpc("worker_fail_generation", { p_job_id: jobId, p_worker_token: workerToken, p_error: message.slice(0, 900) });
-  const { data: rows } = await admin.from("assets").select("storage_path").eq("job_id", jobId).eq("kind", "sticker");
-  const paths = (rows ?? []).map((row: { storage_path: string }) => row.storage_path);
-  await admin.from("assets").delete().eq("job_id", jobId).eq("kind", "sticker");
-  const cleanupPaths = [...new Set([...paths, ...uploadedPaths])];
-  if (cleanupPaths.length) await admin.storage.from(IMAGE_BUCKET).remove(cleanupPaths);
+  let failError: unknown = null;
+  try {
+    const result = await admin.rpc("worker_fail_generation", { p_job_id: jobId, p_worker_token: workerToken, p_error: message.slice(0, 900) });
+    failError = result.error;
+  } catch (cause) { failError = cause; }
+  try {
+    const { data: rows } = await admin.from("assets").select("storage_path").eq("job_id", jobId).eq("kind", "sticker");
+    const paths = (rows ?? []).map((row: { storage_path: string }) => row.storage_path);
+    await admin.from("assets").delete().eq("job_id", jobId).eq("kind", "sticker");
+    const cleanupPaths = [...new Set([...paths, ...uploadedPaths])];
+    if (cleanupPaths.length) await admin.storage.from(IMAGE_BUCKET).remove(cleanupPaths);
+  } catch { /* Cleanup is best-effort; never hide whether refund persistence succeeded. */ }
+  return !failError;
 }
 
 async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: ModelConfig, promptTemplate: string) {
@@ -291,9 +421,9 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
     p_worker_token: workerToken,
   });
   if (claimError) {
-    await admin.from("generation_jobs").update({ status: "failed", finished_at: new Date().toISOString(), error_message: "生成任务无法启动，请稍后重试" })
+    await admin.from("generation_jobs").update({ status: "failed", finished_at: new Date().toISOString(), error_message: "生成任务无法启动：服务端认领任务失败，未调用图像模型。请管理员检查数据库 RPC 权限和服务端配置。" })
       .eq("id", job.id).eq("status", "queued");
-    throw new Error("生成任务无法启动，请稍后重试");
+    throw new Error("生成任务无法启动：服务端认领任务失败，未调用图像模型。\n建议：请管理员检查数据库 RPC 权限和服务端配置；本次不会产生模型调用费用。若无法确认任务状态，请先查看任务历史和余额。");
   }
   if (!claimed) throw new Error("该任务正在处理中或已完成，请勿重复提交");
 
@@ -302,7 +432,7 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
   try {
     const secretResult = await admin.rpc("worker_get_image_provider_api_key", { p_provider_id: model.providerId });
     const { data: secret, error: secretError } = secretResult;
-    if (secretError || typeof secret !== "string" || !secret) throw new Error("此模型未启用或尚未配置 API Key");
+    if (secretError || typeof secret !== "string" || !secret) throw new Error("当前模型未启用、供应商密钥未保存或密钥读取失败；模型调用尚未开始。\n建议：请管理员检查模型启用状态、API Key 保存状态及数据库密钥读取权限。");
 
     const { data: reserved, error: reserveError } = await admin.rpc("worker_reserve_generation_coins", {
       p_job_id: job.id,
@@ -310,24 +440,24 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
     });
     if (reserveError) {
       if (reserveError.message.toLowerCase().includes("insufficient wallet balance")) {
-        throw new Error("汪币余额不足，请选择价格更低的模型或先充值");
+        throw new Error("汪币余额不足，本次模型调用未开始。\n建议：刷新余额，选择价格更低的已启用模型，或先补充汪币。");
       }
-      throw new Error(reserveError.message);
+      throw new Error(`汪币预扣失败，模型调用尚未开始（${safeText(reserveError.message, 220)}）。\n建议：请刷新余额，并让管理员检查数据库结算 RPC、权限和服务状态；确认任务历史后再重试。`);
     }
     balanceAfterReserve = Number(reserved ?? 0);
 
-    if (!validateReferencePath(job.reference_path, job.user_id)) throw new Error("角色参考图路径无效");
+    if (!validateReferencePath(job.reference_path, job.user_id)) throw new Error("角色参考图路径无效或不属于当前账号，模型调用尚未开始。请重新上传图片后再试。");
     const { data: reference, error: referenceError } = await admin.storage.from(IMAGE_BUCKET).download(job.reference_path);
-    if (referenceError || !reference) throw new Error("无法读取已上传的角色参考图");
-    if (reference.size === 0 || reference.size > 12 * 1024 * 1024) throw new Error("角色参考图为空或超过 12 MB");
+    if (referenceError || !reference) throw new Error(`无法读取已上传的角色参考图${referenceError?.message ? `（${safeText(referenceError.message, 180)}）` : ""}。\n建议：请重新上传图片；若仍失败，请管理员检查私有存储桶 jiwang-private、对象路径和服务端读取权限。`);
+    if (reference.size === 0 || reference.size > 12 * 1024 * 1024) throw new Error("角色参考图为空或超过 12 MB。请换一张有效且较小的 PNG、JPG 或 WebP 图片。");
     const referenceType = reference.type || "image/png";
-    if (!/^image\/(png|jpeg|webp)$/.test(referenceType)) throw new Error("角色参考图格式不受支持");
+    if (!/^image\/(png|jpeg|webp)$/.test(referenceType)) throw new Error(`角色参考图格式不受支持（${referenceType}）；请重新上传 PNG、JPG 或 WebP 图片。`);
     const apiEndpoint = safeEndpoint(model.endpoint);
     const { data: promptRow } = await admin.from("admin_settings").select("value").eq("setting_key", "prompts").maybeSingle();
     const template = typeof promptRow?.value?.sticker === "string" ? promptRow.value.sticker : DEFAULT_PROMPT;
     const options = job.options;
     const cells = validateCells(options?.cells);
-    if (!cells || options?.cellCount !== 16) throw new Error("任务脚本不完整，必须包含 16 格描述");
+    if (!cells || options?.cellCount !== 16) throw new Error("任务脚本不完整，必须包含 16 格且每格有短句和画面描述。请返回工坊检查脚本后再试。");
 
     for (let start = 0; start < cells.length; start += 8) {
       const batch = cells.slice(start, start + 8);
@@ -353,7 +483,7 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
           contentType: output.contentType,
           upsert: true,
         });
-        if (uploadError) throw uploadError;
+        if (uploadError) throw new Error(`第 ${index + 1} 张图片已生成，但保存到私有素材库失败（${safeText(uploadError.message, 220)}）。\n建议：本任务会标记失败并尝试退回已预扣汪币；请刷新任务历史和余额，并让管理员检查存储空间、存储桶权限和数据库连接。`);
         storedPaths.push(storagePath);
         rows.push({
           user_id: job.user_id,
@@ -367,24 +497,28 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
         });
       }
       const { error: assetError } = await admin.from("assets").delete().eq("job_id", job.id).eq("kind", "sticker").gte("cell_index", start).lt("cell_index", start + outputs.length);
-      if (assetError) throw assetError;
+      if (assetError) throw new Error(`第 ${start + 1}–${start + outputs.length} 张图片生成后，更新素材记录失败（${safeText(assetError.message, 220)}）。\n建议：任务会尝试退款；请管理员检查 assets 表和数据库权限。`);
       const { error: insertError } = await admin.from("assets").insert(rows);
-      if (insertError) throw insertError;
+      if (insertError) throw new Error(`第 ${start + 1}–${start + outputs.length} 张图片生成后，写入素材记录失败（${safeText(insertError.message, 220)}）。\n建议：任务会尝试退款；请管理员检查 assets 表、数据库连接及权限。`);
       const progress = Math.min(95, 20 + Math.round(((start + outputs.length) / 16) * 75));
       const { error: progressError } = await admin.rpc("worker_update_generation_progress", {
         p_job_id: job.id,
         p_worker_token: workerToken,
         p_progress: progress,
       });
-      if (progressError) throw progressError;
+      if (progressError) throw new Error(`图片已生成，但更新任务进度失败（${safeText(progressError.message, 220)}）。\n建议：请管理员检查生成任务进度 RPC 权限；任务将尝试标记失败并退回已预扣汪币。`);
     }
     const { error: completeError } = await admin.rpc("worker_complete_generation", {
       p_job_id: job.id,
       p_worker_token: workerToken,
     });
-    if (completeError) throw completeError;
+    if (completeError) throw new Error(`图片已生成，但任务完成状态写入失败（${safeText(completeError.message, 220)}）。\n建议：请先查看任务历史和素材库；系统会尝试标记失败并退回已预扣汪币，如状态或余额不符请联系管理员核对。`);
   } catch (error) {
-    await failJob(admin, job.id, workerToken, error, storedPaths);
+    const failureSaved = await failJob(admin, job.id, workerToken, error, storedPaths);
+    if (!failureSaved) {
+      const message = error instanceof Error ? error.message : "图像生成失败";
+      throw new Error(`${message}\n\n严重提醒：服务端未能确认失败/退款记录已写入。请勿重复提交；立即刷新任务历史与汪币余额，并联系管理员核对该任务的退款流水。`);
+    }
     throw error;
   }
   return { images: await signedImages(admin, job.id), balance: balanceAfterReserve };
@@ -392,7 +526,7 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
 
 async function currentModel(admin: SupabaseClient, modelId: string): Promise<ModelConfig> {
   const { data, error } = await admin.from("admin_settings").select("value").eq("setting_key", "model").maybeSingle();
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(`无法读取模型配置（${safeText(error.message, 220)}），本次任务尚未调用模型或预扣汪币。\n建议：请管理员检查 admin_settings 表、数据库连接和服务端权限。`);
   const value = data?.value && typeof data.value === "object" ? data.value as Record<string, unknown> : {};
   const providers = Array.isArray(value.providers) ? value.providers as Array<Record<string, unknown>> : [];
   for (const provider of providers) {
@@ -504,7 +638,7 @@ async function handleRetry(admin: SupabaseClient, user: { id: string; app_metada
 Deno.serve(async (request: Request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (request.method !== "POST") return respond(405, { error: "Method not allowed" });
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) return respond(500, { error: "生成服务未配置" });
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) return respond(500, { error: "生成服务端环境变量未配置；任务尚未创建、模型未调用且未预扣汪币。请管理员检查 Supabase Edge Function 密钥配置。" });
 
   const authorization = request.headers.get("Authorization") || "";
   const accessToken = authorization.replace(/^Bearer\s+/i, "");
@@ -517,10 +651,15 @@ Deno.serve(async (request: Request) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   const { data: userResult, error: userError } = await userClient.auth.getUser(accessToken);
-  if (userError || !userResult.user) return respond(401, { error: "登录状态无效，请重新登录" });
+  if (userError || !userResult.user) {
+    if (/fetch|network|timeout|timed out/i.test(userError?.message || "")) {
+      return respond(503, { error: "暂时无法连接登录验证服务，尚未创建任务或预扣汪币。请检查网络后重新登录，再查看任务历史和余额。" });
+    }
+    return respond(401, { error: "登录状态无效或已过期，尚未创建任务或预扣汪币。请重新登录后再试。" });
+  }
 
   let parsed: unknown;
-  try { parsed = await request.json(); } catch { return respond(400, { error: "请求 JSON 无效" }); }
+  try { parsed = await request.json(); } catch { return respond(400, { error: "请求内容不是有效 JSON；任务尚未创建、模型未调用且未预扣汪币。请刷新页面后重试。" }); }
   const body = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
   if (body.action === "list_models") {
     try { return await handleModelList(admin, userResult.user, body); }
@@ -538,8 +677,8 @@ Deno.serve(async (request: Request) => {
   const title = safeText(body.title, 120, "未命名表情套装");
   const cells = validateCells(body.cells);
   const opts = body.options && typeof body.options === "object" ? body.options as Record<string, unknown> : {};
-  if (!isUuid(jobId) || !isUuid(modelId) || !referencePath || !topic || !cells) return respond(400, { error: "任务参数不完整或无效" });
-  if (!validateReferencePath(referencePath, userResult.user.id)) return respond(403, { error: "不能读取其他用户的参考图" });
+  if (!isUuid(jobId) || !isUuid(modelId) || !referencePath || !topic || !cells) return respond(400, { error: "任务参数不完整或无效：请确认任务编号、模型、主题、参考图和完整 16 格脚本；本次尚未创建任务或预扣汪币。" });
+  if (!validateReferencePath(referencePath, userResult.user.id)) return respond(403, { error: "参考图路径无效或不属于当前账号；任务尚未创建、模型未调用且未预扣汪币。请重新上传角色图。" });
   const options: JobOptions = {
     cellCount: 16,
     cells,
@@ -550,11 +689,11 @@ Deno.serve(async (request: Request) => {
 
   try {
     const { data: existing, error: existingError } = await admin.from("generation_jobs").select("id,user_id,status").eq("id", jobId).maybeSingle();
-    if (existingError) return respond(500, { error: existingError.message });
+    if (existingError) return respond(500, { error: `无法检查重复任务（${safeText(existingError.message, 220)}），任务尚未开始计费。请管理员检查数据库连接和 generation_jobs 权限。` });
     if (existing) {
       if (existing.user_id !== userResult.user.id) return respond(404, { error: "任务不存在" });
       if (existing.status === "completed") return respond(200, { jobId, images: await signedImages(admin, jobId), reused: true });
-      return respond(409, { error: "此任务已提交或正在处理，请稍后查看任务记录", jobId });
+      return respond(409, { error: `此任务已存在，当前状态为「${existing.status}」；为避免重复扣费，本次没有重新提交。请到任务历史查看该任务，确认失败退款后再开始新任务。`, jobId });
     }
 
     const model = await currentModel(admin, modelId);
@@ -574,7 +713,14 @@ Deno.serve(async (request: Request) => {
       progress: 0,
       options,
     });
-    if (insertError) return respond(409, { error: "任务编号已使用，请重新发起生成" });
+    if (insertError) {
+      const duplicate = insertError.code === "23505";
+      return respond(duplicate ? 409 : 500, {
+        error: duplicate
+          ? "任务编号已使用，尚未启动模型调用。请返回工坊重新发起任务。"
+          : `无法创建生成任务（${safeText(insertError.message, 220)}），模型调用尚未开始且未预扣汪币。请管理员检查 generation_jobs 表、数据库连接和权限。`,
+      });
+    }
 
     const template = typeof promptRow?.value?.sticker === "string" ? promptRow.value.sticker : DEFAULT_PROMPT;
     const result = await processJob(admin, {

@@ -44,7 +44,7 @@ const themeText = computed({
 const isAdmin = computed(() => !supabaseConfigured || auth.user?.app_metadata?.role === 'admin')
 const title = computed(() => sections.find((item) => item.id === activeSection.value)?.label || '运营总览')
 const userRows = computed(() => (workspace.value?.users || []).filter((user) => `${user.email} ${user.displayName}`.toLowerCase().includes(searchText.value.toLowerCase())))
-const jobRows = computed(() => (workspace.value?.jobs || []).filter((job) => `${job.title} ${job.topic} ${job.userEmail} ${job.jobId} ${job.modelName || ''}`.toLowerCase().includes(searchText.value.toLowerCase())))
+const jobRows = computed(() => (workspace.value?.jobs || []).filter((job) => `${job.title} ${job.topic} ${job.userEmail} ${job.jobId} ${job.modelName || ''} ${job.errorMessage || ''}`.toLowerCase().includes(searchText.value.toLowerCase())))
 const failureRate = computed(() => {
   const metrics = workspace.value?.metrics
   return metrics?.jobs ? `${((metrics.failedJobs / metrics.jobs) * 100).toFixed(1)}%` : '0%'
@@ -213,7 +213,7 @@ async function saveProvider() {
 async function retryJob(job: AdminJob) {
   try {
     await ElMessageBox.confirm(
-      '系统会使用该任务对应的模型重新生成，并按当前模型价格预扣汪币；成功后结算，失败会自动退回。',
+      '系统会使用该任务对应的模型重新生成，并按当前模型价格预扣汪币；成功后结算，失败时会尝试退款，请在任务记录和用户余额中确认退款状态。',
       `重新排队：${job.title}`,
       { confirmButtonText: '确认重排', cancelButtonText: '取消', type: 'warning' },
     )
@@ -294,7 +294,7 @@ async function resetSettings() {
         当前为演示模式：后台设置只保存在此浏览器，示例用户与统计不代表真实线上数据。配置 Supabase 并应用管理后台迁移后，管理员可管理云端数据。
       </el-alert>
       <el-alert v-else class="admin-notice" type="success" :closable="false" show-icon>
-        管理后台已连接云端。图像生成由 Supabase Edge Function 在服务端调用；模型 API 密钥保存在 Vault，失败任务会自动退回已预扣汪币。
+        管理后台已连接云端。图像生成由 Supabase Edge Function 在服务端调用；模型 API 密钥保存在 Vault，失败任务会尝试退回已预扣汪币，需结合任务详情和余额确认。
       </el-alert>
       <el-alert v-if="workspace && !workspace.demo && !workspace.providerModelSchemaReady" class="admin-notice" type="warning" :closable="false" show-icon>
         模型数据结构正在升级；现有供应商与模型可查看，但暂时不能编辑或保存。升级完成后刷新页面即可继续操作。
@@ -340,10 +340,11 @@ async function resetSettings() {
             <el-table-column label="任务" min-width="230"><template #default="{ row }"><div class="table-primary">{{ row.title }}</div><div class="table-secondary">{{ row.topic || '自定义主题' }} · {{ row.assetCount || 0 }} 格 · {{ row.modelName || '—' }} · {{ row.priceCoins || 0 }} 汪币</div></template></el-table-column>
             <el-table-column prop="userEmail" label="用户" min-width="165" show-overflow-tooltip />
             <el-table-column label="状态" width="115"><template #default="{ row }"><span class="admin-status" :class="row.status"><i></i>{{ statusLabel(row.status) }}</span></template></el-table-column>
+            <el-table-column label="失败诊断" min-width="320" show-overflow-tooltip><template #default="{ row }"><span v-if="row.status === 'failed'">{{ row.errorMessage || '该任务未保存失败详情；请检查是否为旧任务，并先核对用户退款状态。' }}</span><span v-else class="table-muted">—</span></template></el-table-column>
             <el-table-column label="创建时间" width="145"><template #default="{ row }">{{ dateLabel(row.createdAt) }}</template></el-table-column>
             <el-table-column label="操作" width="125" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed'" class="table-action" link type="primary" @click="retryJob(row as AdminJob)"><RefreshCw :size="13" />重新生成</el-button><span v-else class="table-muted">—</span></template></el-table-column>
           </el-table></div>
-          <p class="admin-table-note"><Clock3 :size="13" /> 重试会通过服务端重新调用模型，并按当前模型价格扣费；失败时数据库事务会自动退款。</p>
+          <p class="admin-table-note"><Clock3 :size="13" /> 重试会通过服务端重新调用模型，并按当前模型价格扣费；失败时系统会尝试退款，请根据用户余额和账本记录确认是否到账。</p>
         </section>
 
         <section v-else-if="activeSection === 'users'" class="admin-section">

@@ -26,6 +26,7 @@ export interface GenerationJob {
   createdAt: string
   finishedAt?: string
   assetCount?: number
+  errorMessage?: string
 }
 
 export interface GenerationOptions {
