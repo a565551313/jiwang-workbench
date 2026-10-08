@@ -2,14 +2,18 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 type DraftCell = { caption: string; visual: string };
+type ImageApiProtocol = "responses" | "chat_completions" | "legacy_image_edits";
 type ModelConfig = {
   id: string;
+  providerId: string;
   provider: string;
+  protocol: ImageApiProtocol;
   name: string;
   endpoint: string;
   enabled: boolean;
   priceCoins: number;
   secretConfigured: boolean;
+  legacy?: boolean;
 };
 type JobOptions = {
   cellCount: number;
@@ -82,6 +86,7 @@ function safeEndpoint(value: string): string {
     throw new Error("模型 API Base URL 必须是干净的 HTTPS 地址");
   }
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isNonPublicAddress(host)) throw new Error("模型 API 地址不能指向本地或内网主机");
   if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal" ||
       host === "127.0.0.1" || host === "::1" || /^10\./.test(host) || /^192\.168\./.test(host) ||
       /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
@@ -126,14 +131,18 @@ function isNonPublicAddress(host: string): boolean {
 }
 
 async function imageFromResponse(data: Record<string, unknown>): Promise<ImagePayload> {
-  const encoded = data.b64_json;
+  const encoded = typeof data.b64_json === "string" ? data.b64_json : data.result;
   if (typeof encoded === "string" && encoded.length > 0) {
     const bytes = bytesFromBase64(encoded);
-    if (bytes.byteLength > 10 * 1024 * 1024) throw new Error("模型返回的单张图超过 10 MB 限制");
-    return { bytes, contentType: "image/png" };
+    if (bytes.byteLength === 0 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("模型返回的单张图为空或超过 10 MB 限制");
+    const contentType = typeof data.content_type === "string" && /^image\/(png|jpeg|webp)$/.test(data.content_type) ? data.content_type : "image/png";
+    return { bytes, contentType };
   }
-  const urlText = data.url;
+  const nestedUrl = data.image_url && typeof data.image_url === "object" ? (data.image_url as Record<string, unknown>).url : undefined;
+  const urlText = typeof data.url === "string" ? data.url : nestedUrl;
   if (typeof urlText === "string") {
+    const dataUrl = urlText.match(/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/);
+    if (dataUrl) return await imageFromResponse({ b64_json: dataUrl[2], content_type: dataUrl[1] });
     const imageUrl = new URL(urlText);
     if (imageUrl.protocol !== "https:" || isNonPublicAddress(imageUrl.hostname)) throw new Error("模型返回了不安全的图片地址");
     const response = await fetch(imageUrl, { redirect: "error", signal: AbortSignal.timeout(15_000) });
@@ -146,30 +155,125 @@ async function imageFromResponse(data: Record<string, unknown>): Promise<ImagePa
   throw new Error("模型响应中没有可用图像（需要 data[0].b64_json 或 data[0].url）");
 }
 
+function base64FromBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+async function imageFromChatCompletion(payload: Record<string, unknown>): Promise<ImagePayload> {
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  const choice = choices.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+  const message = choice?.message && typeof choice.message === "object" ? choice.message as Record<string, unknown> : {};
+  const imageCandidates: Record<string, unknown>[] = [];
+  if (Array.isArray(message.images)) {
+    for (const image of message.images) {
+      if (!image || typeof image !== "object") continue;
+      const item = image as Record<string, unknown>;
+      imageCandidates.push(item, item.image_url && typeof item.image_url === "object" ? item.image_url as Record<string, unknown> : {});
+    }
+  }
+  if (Array.isArray(message.content)) {
+    for (const part of message.content) {
+      if (!part || typeof part !== "object") continue;
+      const item = part as Record<string, unknown>;
+      if (["image", "image_url", "output_image"].includes(String(item.type))) {
+        imageCandidates.push(item, item.image_url && typeof item.image_url === "object" ? item.image_url as Record<string, unknown> : {});
+      }
+    }
+  }
+  for (const candidate of imageCandidates) {
+    try { return await imageFromResponse(candidate); } catch { /* Try the next advertised image candidate. */ }
+  }
+  if (typeof message.content === "string") {
+    const dataUrl = message.content.match(/data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+/);
+    const markdownUrl = message.content.match(/!\[[^\]]*\]\((https:\/\/[^\s)]+)\)/);
+    const plainUrl = message.content.match(/https:\/\/[^\s)\]]+/);
+    const imageRef = dataUrl?.[0] || markdownUrl?.[1] || plainUrl?.[0];
+    if (imageRef) return await imageFromResponse({ url: imageRef });
+  }
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  const first = rows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+  if (first) return await imageFromResponse(first);
+  throw new Error("Chat Completions 未返回可用图像；请确认该上游模型支持图像输出");
+}
+
 async function callImageModel(endpoint: string, apiKey: string, model: ModelConfig, reference: Blob, prompt: string): Promise<ImagePayload> {
-  const form = new FormData();
-  form.append("model", model.name);
-  form.append("prompt", prompt);
   const referenceExtension = reference.type === "image/jpeg" ? "jpg" : reference.type === "image/webp" ? "webp" : "png";
-  form.append("image[]", reference, `reference-image.${referenceExtension}`);
-  form.append("n", "1");
-  form.append("size", "1024x1024");
-  const response = await fetch(`${endpoint}/images/edits`, {
+  const referenceUrl = `data:${reference.type || "image/png"};base64,${base64FromBytes(new Uint8Array(await reference.arrayBuffer()))}`;
+  if (model.protocol === "responses") {
+    const response = await fetch(`${endpoint}/responses`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model.name,
+        input: [{ role: "user", content: [
+          { type: "input_text", text: prompt },
+          { type: "input_image", image_url: referenceUrl, detail: "high" },
+        ] }],
+        tools: [{ type: "image_generation", model: model.name, action: "edit", size: "1024x1024", background: "transparent" }],
+        tool_choice: { type: "image_generation" },
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(40_000),
+    });
+    if (!response.ok) throw new Error(`Responses API 请求失败（${response.status}）；请检查协议及模型 ID`);
+    let payload: unknown;
+    try { payload = await response.json(); } catch { throw new Error("Responses API 返回的不是有效 JSON"); }
+    const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    const output = Array.isArray(root.output) ? root.output : [];
+    const imageCall = output.find((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "image_generation_call") as Record<string, unknown> | undefined;
+    if (typeof imageCall?.result === "string") return await imageFromResponse({ b64_json: imageCall.result });
+    const dataRows = Array.isArray(root.data) ? root.data : [];
+    const first = dataRows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+    if (first) return await imageFromResponse(first);
+    throw new Error("Responses API 未返回图像结果");
+  }
+
+  if (model.protocol === "legacy_image_edits") {
+    const form = new FormData();
+    form.append("model", model.name);
+    form.append("prompt", prompt);
+    form.append("image[]", reference, `reference-image.${referenceExtension}`);
+    form.append("n", "1");
+    form.append("size", "1024x1024");
+    const response = await fetch(`${endpoint}/images/edits`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      redirect: "error",
+      signal: AbortSignal.timeout(40_000),
+    });
+    if (!response.ok) throw new Error(`模型 ${model.name} 请求失败（${response.status}）`);
+    let payload: unknown;
+    try { payload = await response.json(); } catch { throw new Error("模型返回的不是有效 JSON"); }
+    const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    const rows = Array.isArray(root.data) ? root.data : [];
+    const first = rows.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+    if (!first) throw new Error("模型没有返回图像数据");
+    return await imageFromResponse(first);
+  }
+
+  const response = await fetch(`${endpoint}/chat/completions`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: form,
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: model.name,
+      messages: [{ role: "user", content: [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: referenceUrl, detail: "high" } },
+      ] }],
+    }),
+    redirect: "error",
     signal: AbortSignal.timeout(40_000),
   });
-  if (!response.ok) {
-    throw new Error(`模型 ${model.name} 请求失败（${response.status}）`);
-  }
+  if (!response.ok) throw new Error(`Chat Completions 请求失败（${response.status}）；请检查协议及模型 ID`);
   let payload: unknown;
-  try { payload = await response.json(); } catch { throw new Error("模型返回的不是有效 JSON"); }
+  try { payload = await response.json(); } catch { throw new Error("Chat Completions 返回的不是有效 JSON"); }
   const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-  const rows = Array.isArray(root.data) ? root.data : [];
-  const first = rows[0] && typeof rows[0] === "object" ? rows[0] as Record<string, unknown> : null;
-  if (!first) throw new Error("模型没有返回图像数据");
-  return await imageFromResponse(first);
+  return await imageFromChatCompletion(root);
 }
 
 function extensionFor(contentType: string): string {
@@ -222,7 +326,10 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
   const storedPaths: string[] = [];
   let balanceAfterReserve = 0;
   try {
-    const { data: secret, error: secretError } = await admin.rpc("worker_get_image_model_api_key", { p_model_id: model.id });
+    const secretResult = model.legacy
+      ? await admin.rpc("worker_get_image_model_api_key", { p_model_id: model.id })
+      : await admin.rpc("worker_get_image_provider_api_key", { p_provider_id: model.providerId });
+    const { data: secret, error: secretError } = secretResult;
     if (secretError || typeof secret !== "string" || !secret) throw new Error("此模型未启用或尚未配置 API Key");
 
     const { data: reserved, error: reserveError } = await admin.rpc("worker_reserve_generation_coins", {
@@ -314,12 +421,100 @@ async function processJob(admin: SupabaseClient, job: GenerationJobRow, model: M
 async function currentModel(admin: SupabaseClient, modelId: string): Promise<ModelConfig> {
   const { data, error } = await admin.from("admin_settings").select("value").eq("setting_key", "model").maybeSingle();
   if (error) throw new Error(error.message);
-  const models = Array.isArray(data?.value?.models) ? data.value.models as ModelConfig[] : [];
-  const model = models.find((item) => item.id === modelId);
-  if (!model || model.enabled !== true || model.secretConfigured !== true) throw new Error("所选模型已停用或未配置 API Key");
-  if (!Number.isInteger(model.priceCoins) || model.priceCoins < 1 || model.priceCoins > 100000) throw new Error("该模型尚未设置有效汪币价格");
-  if (!safeText(model.name, 160) || !isUuid(model.id)) throw new Error("模型配置无效");
-  return model;
+  const value = data?.value && typeof data.value === "object" ? data.value as Record<string, unknown> : {};
+  const providers = Array.isArray(value.providers) ? value.providers as Array<Record<string, unknown>> : [];
+  for (const provider of providers) {
+    const models = Array.isArray(provider.models) ? provider.models as Array<Record<string, unknown>> : [];
+    const configured = models.find((item) => item.id === modelId);
+    if (!configured) continue;
+    const model: ModelConfig = {
+      id: String(configured.id || ""),
+      providerId: String(provider.id || ""),
+      provider: safeText(provider.name, 160),
+      protocol: provider.protocol === "chat_completions" ? "chat_completions" : "responses",
+      name: safeText(configured.name, 160),
+      endpoint: safeText(provider.baseUrl, 2048),
+      enabled: configured.enabled === true,
+      priceCoins: Number(configured.priceCoins),
+      secretConfigured: provider.secretConfigured === true,
+    };
+    if (!model.enabled || !model.secretConfigured) throw new Error("所选模型已停用或未配置 API Key");
+    if (!Number.isInteger(model.priceCoins) || model.priceCoins < 1 || model.priceCoins > 100000) throw new Error("该模型尚未设置有效汪币价格");
+    if (!safeText(model.name, 160) || !isUuid(model.id) || !isUuid(model.providerId)) throw new Error("模型配置无效");
+    return model;
+  }
+
+  // Transitional read support lets the newly deployed function continue working before the data migration is applied.
+  const legacyModels = Array.isArray(value.models) ? value.models as Array<Record<string, unknown>> : [];
+  const legacy = legacyModels.find((item) => item.id === modelId);
+  if (!legacy) throw new Error("所选模型不存在或配置格式已更新");
+  const legacyModel: ModelConfig = {
+    id: String(legacy.id || ""),
+    providerId: String(legacy.id || ""),
+    provider: safeText(legacy.provider, 160),
+    protocol: "legacy_image_edits",
+    name: safeText(legacy.name, 160),
+    endpoint: safeText(legacy.endpoint, 2048),
+    enabled: legacy.enabled === true,
+    priceCoins: Number(legacy.priceCoins),
+    secretConfigured: legacy.secretConfigured === true,
+    legacy: true,
+  };
+  if (!legacyModel.enabled || !legacyModel.secretConfigured) throw new Error("所选模型已停用或未配置 API Key");
+  if (!Number.isInteger(legacyModel.priceCoins) || legacyModel.priceCoins < 1 || legacyModel.priceCoins > 100000) throw new Error("该模型尚未设置有效汪币价格");
+  if (!safeText(legacyModel.name, 160) || !isUuid(legacyModel.id)) throw new Error("模型配置无效");
+  return legacyModel;
+}
+
+async function handleModelList(admin: SupabaseClient, user: { id: string; app_metadata: Record<string, unknown> }, body: Record<string, unknown>) {
+  if (user.app_metadata?.role !== "admin") return respond(403, { error: "只有管理员可以获取上游模型列表" });
+  const providerId = body.providerId;
+  const apiKeyInput = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+  const protocol = body.protocol;
+  const baseUrlInput = safeText(body.baseUrl, 2048);
+  if (!isUuid(providerId) || !baseUrlInput || !["responses", "chat_completions"].includes(String(protocol))) {
+    return respond(400, { error: "供应商 ID、协议或 Base URL 无效" });
+  }
+  if (apiKeyInput.length > 8192 || (apiKeyInput && apiKeyInput.length < 8)) return respond(400, { error: "API Key 长度无效" });
+
+  let apiKey = apiKeyInput;
+  if (!apiKey) {
+    const secretResult = await admin.rpc("worker_get_image_provider_api_key", { p_provider_id: providerId });
+    if (secretResult.error || typeof secretResult.data !== "string" || !secretResult.data) {
+      return respond(400, { error: "请先输入 API Key，或保存该供应商密钥后再获取模型" });
+    }
+    apiKey = secretResult.data;
+  }
+
+  let endpoint: string;
+  try { endpoint = safeEndpoint(baseUrlInput); }
+  catch (cause) { return respond(400, { error: cause instanceof Error ? cause.message : "Base URL 无效" }); }
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${endpoint}/models`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    return respond(502, { error: "无法连接上游模型列表，请检查 Base URL 和网络" });
+  }
+  if (!upstream.ok) return respond(502, { error: `上游模型列表请求失败（${upstream.status}）` });
+
+  let payload: unknown;
+  try { payload = await upstream.json(); }
+  catch { return respond(502, { error: "上游模型列表不是有效 JSON" }); }
+  const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+  const rows = Array.isArray(root.data) ? root.data : Array.isArray(root.models) ? root.models : [];
+  const modelIds = [...new Set(rows.flatMap((item) => {
+    if (typeof item === "string") return [item.trim()];
+    if (!item || typeof item !== "object") return [];
+    const row = item as Record<string, unknown>;
+    const id = typeof row.id === "string" ? row.id : typeof row.name === "string" ? row.name : "";
+    return id.trim() ? [id.trim()] : [];
+  }).filter((id) => id.length <= 160))].slice(0, 500);
+  return respond(200, { models: modelIds });
 }
 
 async function handleRetry(admin: SupabaseClient, user: { id: string; app_metadata: Record<string, unknown> }, body: Record<string, unknown>) {
@@ -374,6 +569,10 @@ Deno.serve(async (request: Request) => {
   let parsed: unknown;
   try { parsed = await request.json(); } catch { return respond(400, { error: "请求 JSON 无效" }); }
   const body = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  if (body.action === "list_models") {
+    try { return await handleModelList(admin, userResult.user, body); }
+    catch { return respond(500, { error: "获取上游模型列表失败" }); }
+  }
   if (body.action === "retry") {
     try { return await handleRetry(admin, userResult.user, body); }
     catch (cause) { return respond(500, { error: cause instanceof Error ? cause.message : "任务重试失败" }); }

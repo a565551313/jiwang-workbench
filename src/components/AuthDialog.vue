@@ -12,11 +12,20 @@ const email = ref('')
 const password = ref('')
 const displayName = ref('')
 const busy = ref(false)
+const authError = ref('')
 const visible = ref(false)
 watch(() => props.modelValue, (value) => { visible.value = value })
 watch(visible, (value) => emit('update:modelValue', value))
 
+function humanizeAuthError(error: unknown) {
+  const message = error instanceof Error ? error.message : ''
+  if (/invalid login credentials/i.test(message)) return '邮箱或密码不匹配，请检查登录信息后重试。'
+  if (/email not confirmed/i.test(message)) return '该邮箱尚未完成验证，请先查收并点击验证邮件。'
+  return message || '登录失败，请稍后重试。'
+}
+
 async function submit() {
+  authError.value = ''
   if (!email.value.trim() || !password.value) {
     ElMessage.warning('请填写邮箱和密码')
     return
@@ -36,7 +45,7 @@ async function submit() {
     }
     visible.value = false
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '操作失败，请稍后重试')
+    authError.value = humanizeAuthError(error)
   } finally {
     busy.value = false
   }
@@ -69,15 +78,16 @@ async function resendConfirmation() {
     <el-alert v-if="!supabaseConfigured" type="warning" :closable="false" show-icon class="auth-alert">
       云端邮箱认证尚未启用。请按项目 README 配置 Supabase 后，注册与登录即可使用。
     </el-alert>
+    <el-alert v-if="authError" type="error" :closable="false" show-icon class="auth-alert">{{ authError }}</el-alert>
     <el-form @submit.prevent="submit" class="auth-form">
       <el-form-item v-if="mode === 'signup'" label="昵称">
         <el-input v-model="displayName" placeholder="怎么称呼你" maxlength="24" />
       </el-form-item>
       <el-form-item label="邮箱">
-        <el-input v-model="email" type="email" autocomplete="email" placeholder="you@example.com" @keyup.enter="submit" />
+        <el-input v-model="email" type="email" autocomplete="email" placeholder="you@example.com" @input="authError = ''" @keyup.enter="submit" />
       </el-form-item>
       <el-form-item label="密码">
-        <el-input v-model="password" type="password" autocomplete="current-password" show-password placeholder="至少 8 位" @keyup.enter="submit" />
+        <el-input v-model="password" type="password" autocomplete="current-password" show-password placeholder="至少 8 位" @input="authError = ''" @keyup.enter="submit" />
       </el-form-item>
       <el-button class="primary-button auth-submit" type="primary" :loading="busy" :disabled="!supabaseConfigured" @click="submit">
         {{ mode === 'login' ? '邮箱登录' : '注册并继续' }}

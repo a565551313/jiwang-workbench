@@ -4,10 +4,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Activity, ArrowUpRight, BadgeCheck, Clock3, Coins, Cpu,
   FileText, History, Images, LayoutDashboard, LoaderCircle, Palette, RefreshCw,
-  Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound, Plus,
+  Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound, Plus, Pencil, Trash2,
 } from '@lucide/vue'
 import AuthDialog from '../components/AuthDialog.vue'
-import { adjustAdminWallet, defaultAdminSettings, loadAdminWorkspace, requeueAdminJob, saveAdminModelApiKey, saveAdminSettings, type AdminImageModel, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
+import { adjustAdminWallet, defaultAdminSettings, fetchUpstreamImageModels, loadAdminWorkspace, requeueAdminJob, saveAdminProviderApiKey, saveAdminSettings, type AdminImageProvider, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
 
@@ -22,7 +22,11 @@ const walletDialogOpen = ref(false)
 const selectedUser = ref<AdminUser | null>(null)
 const walletDelta = ref<number | undefined>()
 const walletNote = ref('')
-const modelApiKeys = ref<Record<string, string>>({})
+const providerDialogOpen = ref(false)
+const providerDraft = ref<AdminImageProvider | null>(null)
+const providerApiKey = ref('')
+const fetchingModels = ref(false)
+const editingProviderId = ref('')
 const sections = [
   { id: 'overview', label: '运营总览', icon: LayoutDashboard },
   { id: 'tasks', label: '任务运维', icon: Activity },
@@ -73,13 +77,17 @@ onMounted(() => { void bootstrap() })
 
 async function saveSettings() {
   if (!workspace.value) return
-  const invalidEnabledModel = settings.value.model.models.find((model) => model.enabled && (
-    !model.secretConfigured || !model.provider.trim() || !model.name.trim() ||
+  if (!workspace.value.demo && !workspace.value.providerModelSchemaReady) {
+    ElMessage.warning('模型数据升级尚未完成，当前配置为只读；请稍后刷新再试')
+    return
+  }
+  const invalidEnabledModel = settings.value.model.providers.some((provider) => provider.models.some((model) => model.enabled && (
+    !provider.secretConfigured || !provider.name.trim() || !model.name.trim() ||
     !Number.isInteger(model.priceCoins) || model.priceCoins < 1 || model.priceCoins > 100000 ||
-    (model.endpoint.trim() && !model.endpoint.trim().startsWith('https://'))
-  ))
+    !provider.baseUrl.trim().startsWith('https://')
+  )))
   if (invalidEnabledModel) {
-    ElMessage.warning('已启用模型必须填写服务商、模型 ID、HTTPS Base URL（如有）、已保存密钥及 1–100000 的整数汪币价格')
+    ElMessage.warning('已启用模型必须填写供应商、模型 ID、HTTPS Base URL、已保存密钥及 1–100000 的整数汪币价格')
     return
   }
   saving.value = true
@@ -92,34 +100,121 @@ async function saveSettings() {
   } finally { saving.value = false }
 }
 
-async function saveModelApiKey(model: AdminImageModel) {
-  const apiKey = modelApiKeys.value[model.id]?.trim() || ''
-  if (!workspace.value || workspace.value.demo || !apiKey) {
-    ElMessage.warning('请先连接 Supabase，并输入第三方模型 API Key')
+function addProvider() {
+  if (!workspace.value || (!workspace.value.demo && !workspace.value.providerModelSchemaReady)) {
+    ElMessage.warning('模型数据升级尚未完成，请稍后刷新再添加供应商')
+    return
+  }
+  editingProviderId.value = ''
+  providerDraft.value = {
+    id: crypto.randomUUID(),
+    name: '',
+    protocol: 'responses',
+    baseUrl: 'https://api.openai.com/v1',
+    secretConfigured: false,
+    models: [],
+  }
+  providerApiKey.value = ''
+  providerDialogOpen.value = true
+}
+
+function editProvider(provider: AdminImageProvider) {
+  if (!workspace.value || (!workspace.value.demo && !workspace.value.providerModelSchemaReady)) {
+    ElMessage.warning('模型数据升级尚未完成，当前配置为只读')
+    return
+  }
+  editingProviderId.value = provider.id
+  providerDraft.value = JSON.parse(JSON.stringify(provider)) as AdminImageProvider
+  providerApiKey.value = ''
+  providerDialogOpen.value = true
+}
+
+function addProviderModel() {
+  if (!providerDraft.value) return
+  providerDraft.value.models.push({ id: crypto.randomUUID(), name: '', enabled: false, priceCoins: 0 })
+}
+
+function removeProviderModel(index: number) {
+  providerDraft.value?.models.splice(index, 1)
+}
+
+async function fetchModels() {
+  const provider = providerDraft.value
+  if (!provider) return
+  if (workspace.value && !workspace.value.demo && !workspace.value.providerModelSchemaReady) {
+    ElMessage.warning('模型数据升级尚未完成，请稍后刷新再获取模型')
+    return
+  }
+  if (!provider.baseUrl.trim() || !provider.baseUrl.trim().startsWith('https://')) {
+    ElMessage.warning('请填写有效的 HTTPS Base URL')
+    return
+  }
+  if (!providerApiKey.value.trim() && !provider.secretConfigured) {
+    ElMessage.warning('首次获取模型列表前，请输入 API Key')
+    return
+  }
+  fetchingModels.value = true
+  try {
+    const modelIds = await fetchUpstreamImageModels({
+      providerId: provider.id,
+      baseUrl: provider.baseUrl.trim(),
+      protocol: provider.protocol,
+      apiKey: providerApiKey.value.trim() || undefined,
+    })
+    const known = new Set(provider.models.map((model) => model.name.trim()))
+    const newIds = modelIds.filter((name) => !known.has(name))
+    provider.models.push(...newIds.map((name) => ({ id: crypto.randomUUID(), name, enabled: false, priceCoins: 0 })))
+    ElMessage.success(`上游返回 ${modelIds.length} 个模型，新增 ${newIds.length} 个模型条目`)
+  } catch (cause) {
+    ElMessage.error(cause instanceof Error ? cause.message : '获取模型列表失败')
+  } finally { fetchingModels.value = false }
+}
+
+async function saveProvider() {
+  const provider = providerDraft.value
+  if (!workspace.value || !provider) return
+  if (!workspace.value.demo && !workspace.value.providerModelSchemaReady) {
+    ElMessage.warning('模型数据升级尚未完成，当前配置为只读')
+    return
+  }
+  if (!provider.name.trim() || !provider.baseUrl.trim() || !provider.baseUrl.trim().startsWith('https://')) {
+    ElMessage.warning('请填写供应商名称和 HTTPS Base URL')
+    return
+  }
+  const modelIds = provider.models.map((model) => model.name.trim())
+  if (modelIds.some((name) => !name) || new Set(modelIds).size !== modelIds.length) {
+    ElMessage.warning('请填写模型 ID，且同一供应商下不能重复')
+    return
+  }
+  if (provider.models.some((model) => model.enabled && (!provider.secretConfigured && !providerApiKey.value.trim() || model.priceCoins < 1 || model.priceCoins > 100000))) {
+    ElMessage.warning('启用模型需要可用 API Key，并设置 1–100000 的整数汪币价格')
+    return
+  }
+  if (providerApiKey.value.trim() && workspace.value.demo) {
+    ElMessage.warning('演示模式无法安全保存 API Key；请连接 Supabase 后再配置')
     return
   }
   saving.value = true
   try {
-    await saveAdminModelApiKey(apiKey, settings.value.model.models, model.id, auth.user?.id)
-    modelApiKeys.value[model.id] = ''
-    model.secretConfigured = true
-    ElMessage.success('该模型的 API Key 已加密保存在 Supabase Vault；页面不会取回原文或写入本地存储')
+    const savedProvider = JSON.parse(JSON.stringify(provider)) as AdminImageProvider
+    const providers = [...settings.value.model.providers]
+    const index = providers.findIndex((item) => item.id === savedProvider.id)
+    if (index >= 0) providers.splice(index, 1, savedProvider)
+    else providers.push(savedProvider)
+    const nextSettings = { ...settings.value, model: { providers } }
+    await saveAdminSettings(nextSettings, workspace.value.demo, auth.user?.id)
+    settings.value = nextSettings
+    if (providerApiKey.value.trim()) {
+      await saveAdminProviderApiKey(providerApiKey.value.trim(), provider.id)
+      provider.secretConfigured = true
+    }
+    providerDialogOpen.value = false
+    providerApiKey.value = ''
+    ElMessage.success('供应商与模型配置已保存；API Key 仅保存在 Supabase Vault')
     await refresh()
   } catch (cause) {
-    ElMessage.error(cause instanceof Error ? cause.message : 'API Key 保存失败')
+    ElMessage.error(cause instanceof Error ? cause.message : '供应商配置保存失败')
   } finally { saving.value = false }
-}
-
-function addModel() {
-  settings.value.model.models.push({
-    id: crypto.randomUUID(),
-    provider: 'OpenAI 兼容接口',
-    name: '',
-    endpoint: '',
-    enabled: false,
-    priceCoins: 0,
-    secretConfigured: false,
-  })
 }
 
 async function retryJob(job: AdminJob) {
@@ -163,11 +258,15 @@ async function confirmWalletAdjustment() {
 }
 
 async function resetSettings() {
+  if (workspace.value && !workspace.value.demo && !workspace.value.providerModelSchemaReady) {
+    ElMessage.warning('模型数据升级尚未完成，当前设置为只读')
+    return
+  }
   try {
     await ElMessageBox.confirm('恢复默认主题、提示词和功能开关？现有模型配置与密钥状态会保留。', '恢复默认设置', { confirmButtonText: '恢复默认', cancelButtonText: '取消', type: 'warning' })
-    const existingModels = JSON.parse(JSON.stringify(settings.value.model.models)) as AdminImageModel[]
+    const existingProviders = JSON.parse(JSON.stringify(settings.value.model.providers)) as AdminImageProvider[]
     settings.value = JSON.parse(JSON.stringify(defaultAdminSettings)) as AdminSettings
-    settings.value.model.models = existingModels
+    settings.value.model.providers = existingProviders
     await saveSettings()
   } catch (cause) {
     if (cause !== 'cancel' && cause !== 'close') ElMessage.error(cause instanceof Error ? cause.message : '恢复失败')
@@ -203,6 +302,9 @@ async function resetSettings() {
       </el-alert>
       <el-alert v-else class="admin-notice" type="success" :closable="false" show-icon>
         管理后台已连接云端。图像生成由 Supabase Edge Function 在服务端调用；模型 API 密钥保存在 Vault，失败任务会自动退回已预扣汪币。
+      </el-alert>
+      <el-alert v-if="workspace && !workspace.demo && !workspace.providerModelSchemaReady" class="admin-notice" type="warning" :closable="false" show-icon>
+        模型数据结构正在升级；现有供应商与模型可查看，但暂时不能编辑或保存。升级完成后刷新页面即可继续操作。
       </el-alert>
 
       <nav class="admin-tabs" aria-label="管理后台模块">
@@ -280,31 +382,61 @@ async function resetSettings() {
         </section>
 
         <section v-else class="admin-section">
-          <div class="admin-section-title"><div><h2>模型与系统</h2><p>每个模型独立设置接口、服务密钥、启停状态和一套 16 格贴图的汪币价格。</p></div><el-button class="admin-primary" type="primary" @click="addModel"><Plus :size="15" />新增模型</el-button></div>
-          <article v-for="(model, index) in settings.model.models" :key="model.id" class="admin-panel model-card">
-            <div class="config-card-title"><span class="config-icon cyan"><Server :size="17" /></span><div><h3>模型 {{ index + 1 }}{{ model.name ? ` · ${model.name}` : '' }}</h3><p>{{ model.enabled ? '已上线，前台用户可选择' : '已停用，不会在前台展示' }} · {{ model.secretConfigured ? '密钥已安全保存' : '尚未配置密钥' }}</p></div><el-switch v-model="model.enabled" :disabled="!model.secretConfigured || !model.name.trim() || model.priceCoins < 1" /></div>
-            <div class="model-fields">
-              <label><span>服务商 / 接口类型</span><el-input v-model="model.provider" placeholder="如：OpenAI 兼容接口" /></label>
-              <label><span>模型名称 / ID</span><el-input v-model="model.name" placeholder="例如 gpt-image-1.5" /></label>
-              <label class="field-wide"><span>图像编辑 API Base URL</span><el-input v-model="model.endpoint" placeholder="例如 https://api.example.com/v1；留空使用 OpenAI 官方地址" /><small class="secret-status">服务端会调用 Base URL 下的 /images/edits 接口；需支持 OpenAI 兼容的 multipart 图像编辑。</small></label>
-              <label><span>每套 16 格价格</span><el-input-number v-model="model.priceCoins" :min="0" :max="100000" :precision="0" controls-position="right" /><small class="secret-status">用户生成一整套时扣除此数；失败会自动退回。</small></label>
-              <label class="field-wide"><span>第三方 API Key</span><div class="model-secret-input"><el-input v-model="modelApiKeys[model.id]" type="password" show-password autocomplete="new-password" :disabled="workspace.demo" placeholder="留空不会更改已保存的密钥" /><el-button class="admin-primary" type="primary" :loading="saving" :disabled="workspace.demo || !modelApiKeys[model.id]?.trim()" @click="saveModelApiKey(model)">安全保存此模型密钥</el-button></div><small class="secret-status">{{ workspace.demo ? '演示模式不能保存密钥；连接 Supabase 后可配置。' : model.secretConfigured ? '密钥已保存；页面只显示状态，不会从 Vault 取回密钥原文。' : '尚未保存模型密钥。保存密钥前会先保存当前模型列表。' }}</small></label>
+          <div class="admin-section-title"><div><h2>模型与系统</h2><p>每个供应商共享协议、Base URL 和 API Key；供应商下可配置多个模型及各自汪币价格。</p></div><el-button class="admin-primary" type="primary" :disabled="!workspace.demo && !workspace.providerModelSchemaReady" @click="addProvider"><Plus :size="15" />添加模型</el-button></div>
+          <article v-for="provider in settings.model.providers" :key="provider.id" class="admin-panel provider-card">
+            <header class="provider-card-head">
+              <span class="config-icon cyan"><Server :size="17" /></span>
+              <div class="provider-card-title"><h3>{{ provider.name }}</h3><p>{{ provider.protocol === 'responses' ? 'Responses API' : 'Chat Completions' }} · {{ provider.baseUrl || '未设置 Base URL' }}</p></div>
+              <span class="provider-secret-state" :class="{ configured: provider.secretConfigured }">{{ provider.secretConfigured ? 'API Key 已保存' : '未配置 API Key' }}</span>
+              <el-button class="admin-quiet provider-edit" :disabled="!workspace.demo && !workspace.providerModelSchemaReady" @click="editProvider(provider)"><Pencil :size="14" />编辑</el-button>
+            </header>
+            <div v-if="provider.models.length" class="provider-model-list">
+              <div v-for="model in provider.models" :key="model.id" class="provider-model-row">
+                <strong>{{ model.name || '未命名模型' }}</strong>
+                <span>{{ money(model.priceCoins) }} 汪币/套</span>
+                <span class="provider-model-state" :class="{ enabled: model.enabled }">{{ model.enabled ? '启用' : '停用' }}</span>
+              </div>
             </div>
+            <div v-else class="provider-model-empty">尚未添加模型；点击“编辑”后可从上游获取。</div>
           </article>
-          <div v-if="settings.model.models.length === 0" class="admin-panel-empty">还没有模型配置，点击“新增模型”开始添加。</div>
-          <div class="secret-note"><ShieldCheck :size="15" /><span>第三方密钥按模型分别加密保存在 Supabase Vault，仅生成 Edge Function 可读取；不会写入浏览器 localStorage。只有价格为正、密钥已配置并启用的模型才会显示在前台。</span></div>
+          <div v-if="settings.model.providers.length === 0" class="admin-panel-empty">还没有供应商或模型配置，点击“添加模型”开始添加。</div>
+          <div class="secret-note"><ShieldCheck :size="15" /><span>供应商 API Key 加密保存在 Supabase Vault，由生成 Edge Function 安全读取；不会返回浏览器或写入 localStorage。只有 API Key 已保存、价格有效并启用的模型才会显示在前台。</span></div>
           <article class="admin-panel feature-panel"><div class="admin-panel-head"><div><h3>产品功能开关</h3><p>控制产品模块的开放状态</p></div><span class="feature-icon"><ToggleLeft :size="16" /></span></div>
             <div class="feature-row"><div><b>邮箱注册</b><small>允许新用户创建极汪账号</small></div><el-switch v-model="settings.features.signup" /></div>
             <div class="feature-row"><div><b>自定义主题</b><small>允许用户输入自定义创作主题</small></div><el-switch v-model="settings.features.customThemes" /></div>
             <div class="feature-row"><div><b>社区投稿入口</b><small>预留投稿审核功能，当前未开放</small></div><el-switch v-model="settings.features.communitySubmissions" /></div>
             <div class="feature-row"><div><b>维护模式</b><small>启用后应由服务端拦截用户侧新任务</small></div><el-switch v-model="settings.features.maintenance" /></div>
           </article>
-          <div class="admin-save-row"><span>模型配置与功能开关保存到后台；启用模型需已配置密钥并设置有效汪币价格。</span><div class="admin-save-actions"><el-button class="admin-quiet" @click="resetSettings"><RefreshCw :size="14" />恢复默认</el-button><el-button class="admin-primary" type="primary" :loading="saving" @click="saveSettings"><Save :size="15" />保存系统设置</el-button></div></div>
+          <div class="admin-save-row"><span>模型配置与功能开关保存到后台；启用模型需已配置 API Key 并设置有效汪币价格。</span><div class="admin-save-actions"><el-button class="admin-quiet" @click="resetSettings"><RefreshCw :size="14" />恢复默认</el-button><el-button class="admin-primary" type="primary" :loading="saving" @click="saveSettings"><Save :size="15" />保存系统设置</el-button></div></div>
         </section>
       </template>
 
       <footer class="admin-footer"><span><BadgeCheck :size="14" /> 权限由 Supabase app_metadata 与 RLS 校验</span><span>极汪管理后台 <b>v0.2</b></span></footer>
     </template>
+
+    <el-dialog v-model="providerDialogOpen" :title="editingProviderId ? '编辑供应商和模型' : '添加模型供应商'" width="760px" class="provider-dialog" :close-on-click-modal="false" destroy-on-close>
+      <template v-if="providerDraft">
+        <div class="provider-form-grid">
+          <label><span>供应商</span><el-input v-model="providerDraft.name" maxlength="100" placeholder="输入供应商名称" /></label>
+          <label><span>上游协议</span><el-select v-model="providerDraft.protocol"><el-option label="Responses API" value="responses" /><el-option label="Chat Completions" value="chat_completions" /></el-select></label>
+          <label class="provider-form-wide"><span>Base URL</span><el-input v-model="providerDraft.baseUrl" placeholder="例如 https://api.example.com/v1" /></label>
+          <label class="provider-form-wide"><span>API Key</span><el-input v-model="providerApiKey" type="password" show-password autocomplete="new-password" :disabled="workspace?.demo" :placeholder="providerDraft.secretConfigured ? '留空保持已保存的密钥不变' : '输入上游 API Key'" /><small>{{ workspace?.demo ? '演示模式无法安全保存密钥，请连接 Supabase 后配置。' : providerDraft.secretConfigured ? '密钥已保存在 Vault；此处不会显示原文。输入新密钥可替换。' : '密钥仅会加密保存到 Supabase Vault，不会保存到浏览器。' }}</small></label>
+        </div>
+        <div class="provider-model-toolbar"><div><strong>模型列表</strong><small>模型 ID、额外汪币、启用状态可逐项编辑</small></div><div><el-button class="admin-quiet" :loading="fetchingModels" :disabled="workspace?.demo || !workspace?.providerModelSchemaReady" @click="fetchModels"><RefreshCw :size="14" />获取模型</el-button><el-button class="admin-quiet" :disabled="!workspace?.demo && !workspace?.providerModelSchemaReady" @click="addProviderModel"><Plus :size="14" />手动添加</el-button></div></div>
+        <div v-if="fetchingModels" class="provider-fetching"><LoaderCircle class="spin" :size="15" />正在从上游获取模型列表…</div>
+        <div v-else-if="providerDraft.models.length" class="provider-edit-list">
+          <div class="provider-edit-header"><span>模型 ID</span><span>额外汪币</span><span>启用</span><span>删除</span></div>
+          <div v-for="(model, index) in providerDraft.models" :key="model.id" class="provider-edit-row">
+            <el-input v-model="model.name" placeholder="例如 gpt-image-2.5" />
+            <el-input-number v-model="model.priceCoins" :min="0" :max="100000" :precision="0" controls-position="right" />
+            <el-checkbox v-model="model.enabled" :disabled="!providerDraft.secretConfigured && !providerApiKey.trim() || model.priceCoins < 1 || !model.name.trim()" />
+            <el-button class="provider-delete-model" text type="danger" aria-label="删除模型" @click="removeProviderModel(index)"><Trash2 :size="15" /></el-button>
+          </div>
+        </div>
+        <div v-else class="provider-model-empty">还没有模型。点击“获取模型”从上游读取，或手动添加一个模型 ID。</div>
+      </template>
+      <template #footer><el-button @click="providerDialogOpen = false">取消</el-button><el-button class="admin-primary" type="primary" :loading="saving" @click="saveProvider"><Save :size="15" />保存</el-button></template>
+    </el-dialog>
 
     <el-dialog v-model="walletDialogOpen" title="调整用户汪币" width="440px" class="wallet-dialog" destroy-on-close>
       <div v-if="selectedUser" class="wallet-target"><span class="user-initial">{{ selectedUser.displayName.slice(0, 1) }}</span><span><b>{{ selectedUser.displayName }}</b><small>{{ selectedUser.email }}</small></span><strong>现有 {{ money(selectedUser.coins) }} 汪币</strong></div>
