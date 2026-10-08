@@ -34,6 +34,8 @@ const progressText = ref('准备就绪')
 const latestJob = ref<GenerationJob | null>(null)
 const options = reactive<GenerationOptions>({ originalStyle: true, noText: false, whiteBorder: true })
 let referenceUpload: Promise<string | undefined> | null = null
+let modelLoadSequence = 0
+const modelLoadFailed = ref(false)
 const categories = computed(() => themeGroups.map((group) => group.label))
 const visibleThemes = computed(() => themeGroups.find((group) => group.label === activeCategory.value)?.themes ?? [])
 const outputTitle = computed(() => titleForTopic(topic.value || themeDescription.value, activeTheme.value))
@@ -60,15 +62,22 @@ function useCustomDraft() {
 }
 
 async function refreshModels() {
+  const requestId = ++modelLoadSequence
   modelsLoading.value = true
   try {
+    const loadedModels = await loadEnabledImageModels()
+    if (requestId !== modelLoadSequence) return
     const previous = selectedModelId.value
-    models.value = await loadEnabledImageModels()
+    models.value = loadedModels
     selectedModelId.value = models.value.some((model) => model.id === previous) ? previous : (models.value[0]?.id || '')
+    modelLoadFailed.value = false
   } catch (error) {
-    models.value = []
+    if (requestId !== modelLoadSequence) return
+    modelLoadFailed.value = models.value.length === 0
     ElMessage.warning(error instanceof Error ? `模型列表加载失败：${error.message}` : '模型列表加载失败')
-  } finally { modelsLoading.value = false }
+  } finally {
+    if (requestId === modelLoadSequence) modelsLoading.value = false
+  }
 }
 
 async function refreshBalance() {
@@ -77,11 +86,12 @@ async function refreshBalance() {
   catch { walletBalance.value = 0 }
 }
 
-onMounted(async () => {
-  await auth.init()
-  await Promise.all([refreshModels(), refreshBalance()])
+onMounted(() => {
+  void refreshModels()
+  void refreshBalance()
+  void auth.init().catch(() => undefined)
 })
-watch(() => auth.user?.id, () => { void refreshBalance(); void refreshModels() })
+watch(() => auth.user?.id, () => { void refreshBalance() })
 
 function chooseFile() { fileInput.value?.click() }
 function handleFileChange(event: Event) {
@@ -293,7 +303,8 @@ onBeforeUnmount(() => {
             <div class="model-price-summary"><span><Coins :size="15" />本套 16 张贴图</span><strong>{{ generationCost }} <small>汪币</small></strong></div>
             <div class="wallet-summary"><span>当前余额</span><strong v-if="auth.user">{{ walletBalance }} 汪币</strong><strong v-else>登录后查看</strong><span v-if="auth.user && walletBalance < generationCost" class="wallet-short">余额不足</span></div>
           </template>
-          <div v-else class="model-empty">目前没有可用模型。请管理员在后台配置密钥、设置汪币价格并启用模型。</div>
+          <div v-else-if="modelLoadFailed" class="model-empty">暂时无法读取模型列表，请检查网络后重试。<button type="button" class="text-action" @click="refreshModels">重试读取</button></div>
+          <div v-else class="model-empty">目前没有已启用的可用模型；请管理员确认模型已配置密钥、设置汪币价格并启用。</div>
           <div v-if="!auth.user" class="model-login-note">真实生成需要登录账号；请先使用页面右上角“登录 / 注册”。</div>
         </section>
       </div>
@@ -313,7 +324,7 @@ onBeforeUnmount(() => {
             <div class="generation-status-top"><span><LoaderCircle v-if="loading" class="spin" :size="15" /><Check v-else-if="latestJob?.status === 'completed'" :size="15" /><Clock3 v-else :size="15" />{{ progressText }}</span><strong>{{ progress }}%</strong></div>
             <el-progress :percentage="progress" :show-text="false" :stroke-width="5" color="#4f86e8" />
           </div>
-          <el-button v-if="generatedCells.length !== 16" class="primary-button generate-button" type="primary" :loading="loading" :disabled="modelsLoading || !selectedModel || !auth.user || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在生成并结算…' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
+          <el-button v-if="generatedCells.length !== 16" class="primary-button generate-button" type="primary" :loading="loading" :disabled="modelsLoading || !selectedModel || !auth.user || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在生成并结算…' : modelsLoading ? '正在读取模型…' : modelLoadFailed ? '模型列表暂不可用' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
           <div v-else class="result-actions"><el-button class="primary-button" type="primary" :loading="zipLoading" @click="downloadZip"><Download :size="16" />下载 16 张 PNG</el-button><el-button class="text-result-button" @click="router.push('/assets')">打开素材库</el-button></div>
           <div class="preview-footnote"><span class="tiny-info">i</span><span>模型在服务端调用；图片保存在账号私有素材库，生成请求失败会退回已预扣汪币。</span></div>
         </section>

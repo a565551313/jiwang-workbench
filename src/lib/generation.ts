@@ -24,16 +24,36 @@ export interface StickerGenerationResult {
   priceCoins?: number
 }
 
-export async function loadEnabledImageModels(): Promise<PublicImageModel[]> {
-  if (!supabase || !supabaseConfigured) return []
-  const { data, error } = await supabase.rpc('public_enabled_image_models')
-  if (error) throw new Error(error.message)
-  return ((data ?? []) as Array<{ id: string; provider: string; name: string; price_coins: number }>).map((row) => ({
-    id: row.id,
-    provider: row.provider,
-    name: row.name,
-    priceCoins: Number(row.price_coins),
-  })).filter((model) => Boolean(model.id && model.name) && Number.isInteger(model.priceCoins) && model.priceCoins > 0)
+let enabledImageModelsRequest: Promise<PublicImageModel[]> | null = null
+
+export function loadEnabledImageModels(): Promise<PublicImageModel[]> {
+  if (!supabase || !supabaseConfigured) return Promise.resolve([])
+  if (enabledImageModelsRequest) return enabledImageModelsRequest
+
+  const request = (async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { data, error } = await supabase.rpc('public_enabled_image_models')
+        if (error) throw new Error(error.message)
+        return ((data ?? []) as Array<{ id: string; provider: string; name: string; price_coins: number }>).map((row) => ({
+          id: row.id,
+          provider: row.provider,
+          name: row.name,
+          priceCoins: Number(row.price_coins),
+        })).filter((model) => Boolean(model.id && model.name) && Number.isInteger(model.priceCoins) && model.priceCoins > 0)
+      } catch (error) {
+        if (attempt === 1) throw error
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+    return []
+  })()
+
+  const sharedRequest = request.finally(() => {
+    if (enabledImageModelsRequest === sharedRequest) enabledImageModelsRequest = null
+  })
+  enabledImageModelsRequest = sharedRequest
+  return sharedRequest
 }
 
 export async function loadWalletBalance(userId: string): Promise<number> {
