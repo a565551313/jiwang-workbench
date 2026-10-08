@@ -1,25 +1,27 @@
 # 极汪 · AI 表情创作工作台
 
-基于 Vue 3、Vite、TypeScript、Element Plus、Pinia 和 Vue Router。前台和管理后台是同一套应用、同一域名和同一端口：前台可匿名访问，管理后台固定在 `/admin`，使用独立管理员账号密码登录。
+基于 Vue 3、Vite、TypeScript、Element Plus、Pinia 和 Vue Router。前台与管理后台共用同一套应用；前台入口为 `/`，管理后台为 `/admin`。
 
-## 访问方式
+## 产品与生成流程
 
-- 本地开发：前台 `http://localhost:5173/`，后台 `http://localhost:5173/admin`。
-- Vercel：前台 `https://你的域名/`，后台 `https://你的域名/admin`。
-- 两个入口共享主机和端口；不启动另一个后台服务、不另开后台端口。普通用户可直接使用前台，访问 `/admin` 只会看到管理员登录页。
-- 管理员登录由服务端校验，使用签名的 12 小时 `HttpOnly`、`SameSite=Strict` Cookie；登录端点校验同源请求并对连续失败尝试限流。账号、密码和会话签名密钥只从环境变量读取。
-- Supabase 云端运营数据还会检查可信的 `app_metadata.role=admin`，数据库继续由 RLS/RPC 校验；它是数据授权的第二道保护，不取代 `/admin` 的独立管理员账号。
+- 管理员可以维护多条图像模型配置，分别填写服务商、模型 ID、API Base URL、Vault API Key、启停状态，以及一套 16 张贴图的汪币价格。
+- 前台只展示已启用、价格大于 0 且密钥存在的模型；用户选择模型后会看到本套价格和当前余额。创建生成任务需要登录。
+- 图像推理只由 `supabase/functions/jiwang-generate` 在服务端执行。它从 Supabase Vault 按模型编号读取 API Key，向 OpenAI 兼容的图像编辑接口提交参考图和 16 格脚本，结果写入私有 Storage。
+- 每套任务使用管理员设定的固定价格。扣款、退款、账本流水与任务状态由受限数据库函数处理；失败时会原子退回预扣汪币。重复请求以任务 ID 防止重复扣款，管理员可按当前模型价格重试失败任务。
+- `src/lib/archive.ts` 只负责下载图片并打包 ZIP；浏览器不再本地模拟生成，也不会直接写入生成任务或扣款记录。
+- 本地未连接 Supabase 时，前台可编辑主题草案和预览布局，但不能发起真实模型调用或扣汪币。
 
-## 当前能力边界
+## 模型接口要求
 
-- 目前尚未接入真实图像模型。`src/lib/mockGenerator.ts` 是独立的 Mock Provider：在浏览器画布中合成演示贴图，不会把图片或提示词提交给第三方推理服务，也不会扣汪币。
-- 未配置云端时，用户可以本地预览和下载；生成记录与 PNG 暂存在当前浏览器。前台邮箱注册/登录仅在 Supabase 配置完成后启用。
-- 配置 Supabase 后，参考图和生成贴图会进入私有 Storage；资料、任务及资产元信息保存在 Postgres。迁移开启 Row Level Security，按 `auth.uid()` 隔离用户记录和存储目录。
-- 不包含真实扣费、订单、会员、广场发布/审核或邀请奖励。
-- 管理后台提供运营概览、跨用户任务查看与失败任务重排、用户/汪币管理、主题/提示词配置、第三方模型配置和功能开关。
-- 未配置 Supabase 时，管理员登录后看到演示数据；设置保存在当前浏览器，不代表真实线上运营数据。
-- 管理后台可以配置 OpenAI 兼容的第三方模型服务商、模型 ID、Base URL，并通过授权 RPC 将 API Key 加密保存到 [Supabase Vault](https://supabase.com/docs/guides/database/vault)。密钥不会从服务端回传，也不会写入普通配置表或 `localStorage`。
-- **配置模型不等于已经启用真实生成**：当前创作流程仍使用 Mock。服务端生成 Worker 尚未接入；后续 Worker 才可通过只授权服务端的数据库函数读取 Vault 密钥并调用第三方模型。
+每条模型的 Base URL 留空时使用 `https://api.openai.com/v1`；否则须是 HTTPS 地址。服务端调用 Base URL 下的 `/images/edits`，以 multipart/form-data 发送 `model`、`prompt`、`image[]`、`n=1` 和 `size=1024x1024`。供应商应兼容 OpenAI 图像编辑协议，并返回 `data[0].b64_json` 或一个可公开读取的 HTTPS `data[0].url`。不支持该协议的供应商需要增加独立适配器，不能仅靠改模型 ID 接入。
+
+一次完整任务会生成 16 张独立图片，每 8 张并发一组，单张模型请求超时为 40 秒、下载返回图片最多等待 15 秒。Supabase Edge Functions 的 wall-clock 上限依项目套餐而定（Free 为 150 秒）；供应商响应较慢或遇到限流时任务会失败并自动退款。生成完成后，私有图片使用限时签名 URL 提供预览和下载。
+
+## 登录与权限
+
+Supabase 云端运营数据通过 RLS 和数据库 RPC 校验。管理员数据权限依赖可信的 Supabase Auth `app_metadata.role=admin`，不能写入用户可自行编辑的 `user_metadata`。浏览器只使用公开 anon/publishable key；`service_role` 和第三方模型 API Key 绝不能放进 `VITE_*` 变量或浏览器代码。
+
+管理后台的独立账号仍由服务端环境变量配置：签名的 12 小时 `HttpOnly`、`SameSite=Strict` Cookie、同源校验与失败限流继续生效。它与 Supabase 运营数据授权是两道独立检查。
 
 ## 本地启动
 
@@ -31,32 +33,36 @@ cp .env.admin.example .env.admin.local
 npm run dev
 ```
 
-打开 `http://localhost:5173/` 使用前台，打开 `http://localhost:5173/admin` 登录管理后台。管理员变量从 `.env.admin.local` 载入；Vite 在同一个 `5173` 服务中提供前台、后台入口和 `/api/admin/*` 会话端点。`.env.admin.local` 已被 Git 忽略，不要提交。
+本地前台地址为 `http://localhost:5173/`，后台地址为 `http://localhost:5173/admin`。Supabase 浏览器配置放在 `.env.local`，管理员变量放在 `.env.admin.local`；两个文件都已被 Git 忽略。
 
-## Vercel 部署
-
-1. 将 `jiwang-workbench` 仓库导入 Vercel，Framework Preset 选 **Vite**，Build Command 使用 `npm run build`，Output Directory 使用 `dist`。
-2. 在 Vercel Project → Settings → Environment Variables 设置 `JIWANG_ADMIN_USERNAME`、`JIWANG_ADMIN_PASSWORD` 和 `JIWANG_ADMIN_SESSION_SECRET`。密码至少 12 个字符，会话密钥至少 32 个字符；使用随机强密码和随机会话密钥，不要复用普通用户邮箱密码。
-3. 若启用 Supabase，在同一项目设置 `VITE_SUPABASE_URL` 和 `VITE_SUPABASE_ANON_KEY`，并在 Supabase Auth 的 Site URL / Redirect URLs 加入 Vercel 域名，然后重新部署。
-4. 构建同时输出前台和后台入口；`vercel.json` 将 `/admin` 与其子路径重写到后台 SPA，并把后台 API 路由交给 Vercel Functions。最终用户只需使用同一个域名：前台 `/`，后台 `/admin`。
-
-独立后台密码必须在 Vercel 环境变量中配置后，`/api/admin/session` 才会启用。若后台运营真实 Supabase 数据，还需在 Supabase Auth 管理端为指定账号设置可信 `app_metadata`：`{"role":"admin"}`，并以该 Supabase 账号通过后台的数据授权检查。不要把角色写入用户可以自行修改的 `user_metadata`，也不要把 `service_role` key 放进 `VITE_*` 变量或浏览器代码。
-
-## 配置 Supabase
-
-1. 创建 Supabase 项目，在 API 设置中取得 **Project URL** 和 **publishable/anon key**，分别放入本地 `.env.local` 或 Vercel 的 `VITE_SUPABASE_URL` 与 `VITE_SUPABASE_ANON_KEY`。
-2. 按顺序在 Supabase SQL Editor 执行 [`supabase/migrations/20261008070000_initial.sql`](supabase/migrations/20261008070000_initial.sql) 和 [`supabase/migrations/20261008073000_admin_console.sql`](supabase/migrations/20261008073000_admin_console.sql)。后台迁移会增加设置、汪币账户/账本、管理员 RPC、Vault 密钥函数和跨用户管理策略。
-3. 在 Supabase Auth 启用 Email provider，并按需设置邮箱确认。可信管理员账号需在 `app_metadata` 中设置 `{"role":"admin"}`。
-4. 浏览器只使用公开 anon/publishable key；数据仍由 RLS、Storage policies 和数据库 RPC 授权。
-
-在管理后台“模型与系统”填写第三方 OpenAI 兼容 Base URL、模型 ID 和 API Key。非敏感连接参数保存在后台配置表；API Key 通过 `admin_set_model_api_key` 存入 Vault。真实生成仍需后续部署服务端 Worker。
-
-## 真实模型接入点与校验
-
-当前 `generate()` 流程将角色图、逐格 caption 与 visual、选项传给 `src/lib/mockGenerator.ts`。后续应替换为 `GenerationProvider`，由 Vercel Function 或 Supabase Edge Function 调用兼容服务；仅服务端组件可以读取 Vault 密钥。异步任务映射到 `generation_jobs`，模型输出再按 4×4 网格切成 16 张并存入私有 bucket。
+常用校验：
 
 ```bash
 npm run typecheck
 npm test
 npm run build
 ```
+
+## Supabase 迁移与生成函数
+
+按顺序在目标 Supabase 项目的 SQL Editor 执行：
+
+1. [`supabase/migrations/20261008070000_initial.sql`](supabase/migrations/20261008070000_initial.sql)
+2. [`supabase/migrations/20261008073000_admin_console.sql`](supabase/migrations/20261008073000_admin_console.sql)
+3. [`supabase/migrations/20261008090000_multi_model_billing.sql`](supabase/migrations/20261008090000_multi_model_billing.sql)
+
+第三个迁移会将旧模型配置和 Vault 密钥安全地迁移为模型列表；原模型保留停用状态、价格设为 0，因此不会自动出现在前台或触发扣费。它还创建每模型密钥管理、已启用模型目录、任务领取、汪币扣款/退款及进度更新函数。
+
+部署生成 Edge Function：
+
+```bash
+supabase functions deploy jiwang-generate --project-ref <project-ref>
+```
+
+该函数要求 JWT 登录验证，并使用 Supabase 托管环境变量 `SUPABASE_URL`、`SUPABASE_ANON_KEY` 和 `SUPABASE_SERVICE_ROLE_KEY`。不要把 service role key 复制到前端。若通过 Supabase Dashboard / 管理工具发布，也必须启用 JWT 验证。
+
+完成迁移与函数部署后，在 `/admin` 的“模型与系统”新增或检查模型，填写 HTTPS Base URL、模型 ID、汪币价格，保存 API Key，再启用并保存模型设置。现有旧密钥已经绑定到原来的 `gpt-image-2.5` 配置，不会自动启用；可先用管理员提供的测试模型/测试账户进行验证。
+
+## Vercel 前端部署
+
+项目使用 Vite 构建，Build Command 为 `npm run build`，Output Directory 为 `dist`。在 Vercel 设置 `VITE_SUPABASE_URL` 和 `VITE_SUPABASE_ANON_KEY`，并在 Supabase Auth 的 Site URL / Redirect URLs 配置对应域名。Vercel 项目需保留现有管理员环境变量 `JIWANG_ADMIN_USERNAME`、`JIWANG_ADMIN_PASSWORD` 与 `JIWANG_ADMIN_SESSION_SECRET`。部署前端代码后，同一域名即可使用 `/` 和 `/admin`。

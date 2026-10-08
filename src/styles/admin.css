@@ -6,3 +6,5 @@
 
 .model-secret-input{display:flex;align-items:center;gap:8px}.model-secret-input .el-input{min-width:0;flex:1}.model-secret-input .el-button{white-space:nowrap;flex:none}.secret-status{display:block;margin-top:6px;color:#889bb5;font-size:8px;line-height:1.65}.model-fields .field-wide:has(.model-secret-input){display:block}.model-fields .field-wide:has(.model-secret-input)>span{display:block;margin-bottom:6px}
 @media(max-width:760px){.model-secret-input{align-items:stretch;flex-direction:column}.model-secret-input .el-button{align-self:flex-end}}
+
+.model-card .el-input-number{width:100%}.model-card .el-input-number .el-input__wrapper{box-shadow:0 0 0 1px #e4eaf2 inset;background:#fbfcfe}.model-card .secret-status{line-height:1.65}.admin-section-title>.admin-primary{flex:none}

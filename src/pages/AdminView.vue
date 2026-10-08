@@ -4,10 +4,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Activity, ArrowUpRight, BadgeCheck, Clock3, Coins, Cpu,
   FileText, History, Images, LayoutDashboard, LoaderCircle, Palette, RefreshCw,
-  Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound,
+  Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound, Plus,
 } from '@lucide/vue'
 import AuthDialog from '../components/AuthDialog.vue'
-import { adjustAdminWallet, defaultAdminSettings, loadAdminWorkspace, requeueAdminJob, saveAdminModelApiKey, saveAdminSettings, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
+import { adjustAdminWallet, defaultAdminSettings, loadAdminWorkspace, requeueAdminJob, saveAdminModelApiKey, saveAdminSettings, type AdminImageModel, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
 
@@ -22,7 +22,7 @@ const walletDialogOpen = ref(false)
 const selectedUser = ref<AdminUser | null>(null)
 const walletDelta = ref<number | undefined>()
 const walletNote = ref('')
-const modelApiKey = ref('')
+const modelApiKeys = ref<Record<string, string>>({})
 const sections = [
   { id: 'overview', label: '运营总览', icon: LayoutDashboard },
   { id: 'tasks', label: '任务运维', icon: Activity },
@@ -39,7 +39,7 @@ const themeText = computed({
 const isAdmin = computed(() => !supabaseConfigured || auth.user?.app_metadata?.role === 'admin')
 const title = computed(() => sections.find((item) => item.id === activeSection.value)?.label || '运营总览')
 const userRows = computed(() => (workspace.value?.users || []).filter((user) => `${user.email} ${user.displayName}`.toLowerCase().includes(searchText.value.toLowerCase())))
-const jobRows = computed(() => (workspace.value?.jobs || []).filter((job) => `${job.title} ${job.topic} ${job.userEmail} ${job.jobId}`.toLowerCase().includes(searchText.value.toLowerCase())))
+const jobRows = computed(() => (workspace.value?.jobs || []).filter((job) => `${job.title} ${job.topic} ${job.userEmail} ${job.jobId} ${job.modelName || ''}`.toLowerCase().includes(searchText.value.toLowerCase())))
 const failureRate = computed(() => {
   const metrics = workspace.value?.metrics
   return metrics?.jobs ? `${((metrics.failedJobs / metrics.jobs) * 100).toFixed(1)}%` : '0%'
@@ -73,8 +73,13 @@ onMounted(() => { void bootstrap() })
 
 async function saveSettings() {
   if (!workspace.value) return
-  if (settings.value.model.enabled && !settings.value.model.secretConfigured) {
-    ElMessage.warning('请先安全保存第三方 API Key，再启用模型服务')
+  const invalidEnabledModel = settings.value.model.models.find((model) => model.enabled && (
+    !model.secretConfigured || !model.provider.trim() || !model.name.trim() ||
+    !Number.isInteger(model.priceCoins) || model.priceCoins < 1 || model.priceCoins > 100000 ||
+    (model.endpoint.trim() && !model.endpoint.trim().startsWith('https://'))
+  ))
+  if (invalidEnabledModel) {
+    ElMessage.warning('已启用模型必须填写服务商、模型 ID、HTTPS Base URL（如有）、已保存密钥及 1–100000 的整数汪币价格')
     return
   }
   saving.value = true
@@ -87,27 +92,40 @@ async function saveSettings() {
   } finally { saving.value = false }
 }
 
-async function saveModelApiKey() {
-  if (!workspace.value || workspace.value.demo || !modelApiKey.value.trim()) {
+async function saveModelApiKey(model: AdminImageModel) {
+  const apiKey = modelApiKeys.value[model.id]?.trim() || ''
+  if (!workspace.value || workspace.value.demo || !apiKey) {
     ElMessage.warning('请先连接 Supabase，并输入第三方模型 API Key')
     return
   }
   saving.value = true
   try {
-    await saveAdminModelApiKey(modelApiKey.value.trim())
-    modelApiKey.value = ''
-    settings.value.model.secretConfigured = true
-    ElMessage.success('API Key 已加密保存在 Supabase Vault；页面不会取回原文或写入本地存储')
+    await saveAdminModelApiKey(apiKey, settings.value.model.models, model.id, auth.user?.id)
+    modelApiKeys.value[model.id] = ''
+    model.secretConfigured = true
+    ElMessage.success('该模型的 API Key 已加密保存在 Supabase Vault；页面不会取回原文或写入本地存储')
     await refresh()
   } catch (cause) {
     ElMessage.error(cause instanceof Error ? cause.message : 'API Key 保存失败')
   } finally { saving.value = false }
 }
 
+function addModel() {
+  settings.value.model.models.push({
+    id: crypto.randomUUID(),
+    provider: 'OpenAI 兼容接口',
+    name: '',
+    endpoint: '',
+    enabled: false,
+    priceCoins: 0,
+    secretConfigured: false,
+  })
+}
+
 async function retryJob(job: AdminJob) {
   try {
     await ElMessageBox.confirm(
-      '这会将失败任务重置为“排队中”。目前真实图像模型和后台 worker 尚未接入，云端任务只会进入队列，不会启动真实生成。',
+      '系统会使用该任务对应的模型重新生成，并按当前模型价格预扣汪币；成功后结算，失败会自动退回。',
       `重新排队：${job.title}`,
       { confirmButtonText: '确认重排', cancelButtonText: '取消', type: 'warning' },
     )
@@ -146,10 +164,10 @@ async function confirmWalletAdjustment() {
 
 async function resetSettings() {
   try {
-    await ElMessageBox.confirm('恢复默认主题、提示词、模型展示参数和功能开关？', '恢复默认设置', { confirmButtonText: '恢复默认', cancelButtonText: '取消', type: 'warning' })
-    const savedSecretState = settings.value.model.secretConfigured
+    await ElMessageBox.confirm('恢复默认主题、提示词和功能开关？现有模型配置与密钥状态会保留。', '恢复默认设置', { confirmButtonText: '恢复默认', cancelButtonText: '取消', type: 'warning' })
+    const existingModels = JSON.parse(JSON.stringify(settings.value.model.models)) as AdminImageModel[]
     settings.value = JSON.parse(JSON.stringify(defaultAdminSettings)) as AdminSettings
-    settings.value.model.secretConfigured = savedSecretState
+    settings.value.model.models = existingModels
     await saveSettings()
   } catch (cause) {
     if (cause !== 'cancel' && cause !== 'close') ElMessage.error(cause instanceof Error ? cause.message : '恢复失败')
@@ -183,8 +201,8 @@ async function resetSettings() {
       <el-alert v-if="workspace?.demo" class="admin-notice" type="info" :closable="false" show-icon>
         当前为演示模式：后台设置只保存在此浏览器，示例用户与统计不代表真实线上数据。配置 Supabase 并应用管理后台迁移后，管理员可管理云端数据。
       </el-alert>
-      <el-alert v-else class="admin-notice" type="warning" :closable="false" show-icon>
-        管理后台已连接云端。真实模型推理与异步 worker 尚未接入；模型 API 密钥必须保存在服务端 Secret 中，不会存进浏览器配置表。
+      <el-alert v-else class="admin-notice" type="success" :closable="false" show-icon>
+        管理后台已连接云端。图像生成由 Supabase Edge Function 在服务端调用；模型 API 密钥保存在 Vault，失败任务会自动退回已预扣汪币。
       </el-alert>
 
       <nav class="admin-tabs" aria-label="管理后台模块">
@@ -207,30 +225,30 @@ async function resetSettings() {
             <article class="admin-panel admin-task-panel">
               <div class="admin-panel-head"><div><h3>近期生成任务</h3><p>实时检查队列状态</p></div><button class="admin-link-button" @click="activeSection = 'tasks'">查看全部 <ArrowUpRight :size="14" /></button></div>
               <div v-if="workspace.jobs.length" class="admin-mini-jobs">
-                <div v-for="job in workspace.jobs.slice(0, 5)" :key="job.jobId" class="admin-mini-job"><span class="job-status-dot" :class="job.status"></span><div class="mini-job-name"><strong>{{ job.title }}</strong><small>{{ job.userEmail }} · {{ dateLabel(job.createdAt) }}</small></div><span class="admin-status" :class="job.status">{{ statusLabel(job.status) }}</span></div>
+                <div v-for="job in workspace.jobs.slice(0, 5)" :key="job.jobId" class="admin-mini-job"><span class="job-status-dot" :class="job.status"></span><div class="mini-job-name"><strong>{{ job.title }}</strong><small>{{ job.userEmail }} · {{ job.modelName || '模型待定' }} · {{ job.priceCoins || 0 }} 汪币</small></div><span class="admin-status" :class="job.status">{{ statusLabel(job.status) }}</span></div>
               </div><div v-else class="admin-panel-empty">暂无任务</div>
             </article>
             <article class="admin-panel health-panel">
-              <div class="admin-panel-head"><div><h3>系统健康度</h3><p>原型环境服务接入状态</p></div><span class="health-icon"><Activity :size="16" /></span></div>
+              <div class="admin-panel-head"><div><h3>系统健康度</h3><p>云端生成与账本服务状态</p></div><span class="health-icon"><Activity :size="16" /></span></div>
               <div class="health-row"><span><i class="health-check"></i>邮箱认证与资料库</span><b>{{ workspace.demo ? '演示' : '已连接' }}</b></div>
               <div class="health-row"><span><i class="health-check"></i>任务与素材存储</span><b>{{ workspace.demo ? '演示' : '已连接' }}</b></div>
-              <div class="health-row"><span><i class="health-pending"></i>真实图像生成 Worker</span><b class="pending-text">未接入</b></div>
+              <div class="health-row"><span><i :class="workspace.demo ? 'health-pending' : 'health-check'"></i>真实图像生成服务</span><b :class="{ 'pending-text': workspace.demo }">{{ workspace.demo ? '未连接' : 'Edge Function' }}</b></div>
               <div class="health-summary"><span><History :size="15" /> 近 24 小时任务</span><strong>{{ money(workspace.metrics.todayJobs) }}</strong></div>
-              <div class="health-meter"><span :style="{ width: `${Math.max(8, 100 - Math.min(Number.parseFloat(failureRate), 100))}%` }"></span></div><small class="health-footnote">失败率 {{ failureRate }} · 当前数据不包含真实推理延迟</small>
+              <div class="health-meter"><span :style="{ width: `${Math.max(8, 100 - Math.min(Number.parseFloat(failureRate), 100))}%` }"></span></div><small class="health-footnote">失败率 {{ failureRate }} · 生成状态由云端任务记录更新</small>
             </article>
           </div>
         </section>
 
         <section v-else-if="activeSection === 'tasks'" class="admin-section">
-          <div class="admin-section-title"><div><h2>任务运维</h2><p>查看用户生成任务；失败任务可重新放回队列。</p></div><div class="admin-search"><Search :size="15" /><el-input v-model="searchText" placeholder="搜索任务 / 用户" clearable /></div></div>
+          <div class="admin-section-title"><div><h2>任务运维</h2><p>查看生成模型和费用；失败任务可按当前模型价格重试。</p></div><div class="admin-search"><Search :size="15" /><el-input v-model="searchText" placeholder="搜索任务 / 用户 / 模型" clearable /></div></div>
           <div class="admin-table-wrap"><el-table :data="jobRows" stripe style="width: 100%" empty-text="没有匹配的生成任务">
-            <el-table-column label="任务" min-width="210"><template #default="{ row }"><div class="table-primary">{{ row.title }}</div><div class="table-secondary">{{ row.topic || '自定义主题' }} · {{ row.assetCount || 0 }} 格</div></template></el-table-column>
+            <el-table-column label="任务" min-width="230"><template #default="{ row }"><div class="table-primary">{{ row.title }}</div><div class="table-secondary">{{ row.topic || '自定义主题' }} · {{ row.assetCount || 0 }} 格 · {{ row.modelName || '—' }} · {{ row.priceCoins || 0 }} 汪币</div></template></el-table-column>
             <el-table-column prop="userEmail" label="用户" min-width="165" show-overflow-tooltip />
             <el-table-column label="状态" width="115"><template #default="{ row }"><span class="admin-status" :class="row.status"><i></i>{{ statusLabel(row.status) }}</span></template></el-table-column>
             <el-table-column label="创建时间" width="145"><template #default="{ row }">{{ dateLabel(row.createdAt) }}</template></el-table-column>
-            <el-table-column label="操作" width="125" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed'" class="table-action" link type="primary" @click="retryJob(row as AdminJob)"><RefreshCw :size="13" />重新排队</el-button><span v-else class="table-muted">—</span></template></el-table-column>
+            <el-table-column label="操作" width="125" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed'" class="table-action" link type="primary" @click="retryJob(row as AdminJob)"><RefreshCw :size="13" />重新生成</el-button><span v-else class="table-muted">—</span></template></el-table-column>
           </el-table></div>
-          <p class="admin-table-note"><Clock3 :size="13" /> 重新排队只会将任务状态改为 queued；接入服务端生成 Worker 后才会真正开始处理。</p>
+          <p class="admin-table-note"><Clock3 :size="13" /> 重试会通过服务端重新调用模型，并按当前模型价格扣费；失败时数据库事务会自动退款。</p>
         </section>
 
         <section v-else-if="activeSection === 'users'" class="admin-section">
@@ -262,18 +280,26 @@ async function resetSettings() {
         </section>
 
         <section v-else class="admin-section">
-          <div class="admin-section-title"><div><h2>模型与系统</h2><p>控制模型连接参数和产品功能开关。</p></div></div>
-          <article class="admin-panel model-card"><div class="config-card-title"><span class="config-icon cyan"><Server :size="17" /></span><div><h3>第三方图像模型</h3><p>配置 OpenAI 兼容的第三方服务、模型名称和 API 地址。</p></div><el-switch v-model="settings.model.enabled" /></div>
-            <div class="model-fields"><label><span>服务商 / 接口类型</span><el-input v-model="settings.model.provider" placeholder="如：OpenAI 兼容接口" /></label><label><span>模型名称 / ID</span><el-input v-model="settings.model.name" placeholder="填入供应商提供的模型 ID" /></label><label class="field-wide"><span>API Base URL（可选）</span><el-input v-model="settings.model.endpoint" placeholder="例如 https://api.example.com/v1；由服务端调用" /></label><label class="field-wide"><span>第三方 API Key</span><div class="model-secret-input"><el-input v-model="modelApiKey" type="password" show-password autocomplete="new-password" :disabled="workspace.demo" placeholder="留空不会更改已保存的密钥" /><el-button class="admin-primary" type="primary" :loading="saving" :disabled="workspace.demo || !modelApiKey.trim()" @click="saveModelApiKey">安全保存密钥</el-button></div><small class="secret-status">{{ workspace.demo ? '演示模式不能保存密钥；连接 Supabase 后可配置。' : settings.model.secretConfigured ? '已保存一把密钥；页面只显示状态，不会从 Vault 取回密钥原文。' : '尚未保存模型密钥。密钥通过 RPC 写入 Supabase Vault。' }}</small></label></div>
-            <div class="secret-note"><ShieldCheck :size="15" /><span>安全说明：密钥在输入和提交时短暂经过管理员浏览器内存，并通过 Supabase HTTPS RPC 发送；保存后页面不会取回原文或写入 localStorage。Vault 加密保存后，仅服务端 service_role 可读取。当前创作流程仍使用 Mock，接入服务端生成 Worker 后才会调用此模型。</span></div>
+          <div class="admin-section-title"><div><h2>模型与系统</h2><p>每个模型独立设置接口、服务密钥、启停状态和一套 16 格贴图的汪币价格。</p></div><el-button class="admin-primary" type="primary" @click="addModel"><Plus :size="15" />新增模型</el-button></div>
+          <article v-for="(model, index) in settings.model.models" :key="model.id" class="admin-panel model-card">
+            <div class="config-card-title"><span class="config-icon cyan"><Server :size="17" /></span><div><h3>模型 {{ index + 1 }}{{ model.name ? ` · ${model.name}` : '' }}</h3><p>{{ model.enabled ? '已上线，前台用户可选择' : '已停用，不会在前台展示' }} · {{ model.secretConfigured ? '密钥已安全保存' : '尚未配置密钥' }}</p></div><el-switch v-model="model.enabled" :disabled="!model.secretConfigured || !model.name.trim() || model.priceCoins < 1" /></div>
+            <div class="model-fields">
+              <label><span>服务商 / 接口类型</span><el-input v-model="model.provider" placeholder="如：OpenAI 兼容接口" /></label>
+              <label><span>模型名称 / ID</span><el-input v-model="model.name" placeholder="例如 gpt-image-1.5" /></label>
+              <label class="field-wide"><span>图像编辑 API Base URL</span><el-input v-model="model.endpoint" placeholder="例如 https://api.example.com/v1；留空使用 OpenAI 官方地址" /><small class="secret-status">服务端会调用 Base URL 下的 /images/edits 接口；需支持 OpenAI 兼容的 multipart 图像编辑。</small></label>
+              <label><span>每套 16 格价格</span><el-input-number v-model="model.priceCoins" :min="0" :max="100000" :precision="0" controls-position="right" /><small class="secret-status">用户生成一整套时扣除此数；失败会自动退回。</small></label>
+              <label class="field-wide"><span>第三方 API Key</span><div class="model-secret-input"><el-input v-model="modelApiKeys[model.id]" type="password" show-password autocomplete="new-password" :disabled="workspace.demo" placeholder="留空不会更改已保存的密钥" /><el-button class="admin-primary" type="primary" :loading="saving" :disabled="workspace.demo || !modelApiKeys[model.id]?.trim()" @click="saveModelApiKey(model)">安全保存此模型密钥</el-button></div><small class="secret-status">{{ workspace.demo ? '演示模式不能保存密钥；连接 Supabase 后可配置。' : model.secretConfigured ? '密钥已保存；页面只显示状态，不会从 Vault 取回密钥原文。' : '尚未保存模型密钥。保存密钥前会先保存当前模型列表。' }}</small></label>
+            </div>
           </article>
+          <div v-if="settings.model.models.length === 0" class="admin-panel-empty">还没有模型配置，点击“新增模型”开始添加。</div>
+          <div class="secret-note"><ShieldCheck :size="15" /><span>第三方密钥按模型分别加密保存在 Supabase Vault，仅生成 Edge Function 可读取；不会写入浏览器 localStorage。只有价格为正、密钥已配置并启用的模型才会显示在前台。</span></div>
           <article class="admin-panel feature-panel"><div class="admin-panel-head"><div><h3>产品功能开关</h3><p>控制产品模块的开放状态</p></div><span class="feature-icon"><ToggleLeft :size="16" /></span></div>
             <div class="feature-row"><div><b>邮箱注册</b><small>允许新用户创建极汪账号</small></div><el-switch v-model="settings.features.signup" /></div>
             <div class="feature-row"><div><b>自定义主题</b><small>允许用户输入自定义创作主题</small></div><el-switch v-model="settings.features.customThemes" /></div>
             <div class="feature-row"><div><b>社区投稿入口</b><small>预留投稿审核功能，当前未开放</small></div><el-switch v-model="settings.features.communitySubmissions" /></div>
             <div class="feature-row"><div><b>维护模式</b><small>启用后应由服务端拦截用户侧新任务</small></div><el-switch v-model="settings.features.maintenance" /></div>
           </article>
-          <div class="admin-save-row"><span>功能开关保存到后台配置；实际生效需用户端和任务 Worker 读取同一配置。</span><div class="admin-save-actions"><el-button class="admin-quiet" @click="resetSettings"><RefreshCw :size="14" />恢复默认</el-button><el-button class="admin-primary" type="primary" :loading="saving" @click="saveSettings"><Save :size="15" />保存系统设置</el-button></div></div>
+          <div class="admin-save-row"><span>模型配置与功能开关保存到后台；启用模型需已配置密钥并设置有效汪币价格。</span><div class="admin-save-actions"><el-button class="admin-quiet" @click="resetSettings"><RefreshCw :size="14" />恢复默认</el-button><el-button class="admin-primary" type="primary" :loading="saving" @click="saveSettings"><Save :size="15" />保存系统设置</el-button></div></div>
         </section>
       </template>
 

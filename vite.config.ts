@@ -34,6 +34,8 @@ function sameOriginAdminApp(): Plugin {
   return {
     name: 'jiwang-same-origin-admin-app',
     config() {
+      // 本地开发支持 .env.local 与 .env.admin.local；Vercel 必须只使用 Project Environment Variables。
+      if (process.env.VERCEL) return
       const localEnv = { ...loadEnv('development', projectRoot, ''), ...loadEnv('admin', projectRoot, '') }
       for (const key of ['JIWANG_ADMIN_USERNAME', 'JIWANG_ADMIN_PASSWORD', 'JIWANG_ADMIN_SESSION_SECRET']) {
         if (!process.env[key] && localEnv[key]) process.env[key] = localEnv[key]
@@ -45,6 +47,8 @@ function sameOriginAdminApp(): Plugin {
 }
 
 export default defineConfig({
+  // Vercel 的 VITE_* 值来自构建环境；不要让本地 .env 文件成为线上构建的后备来源。
+  envDir: process.env.VERCEL ? false : projectRoot,
   plugins: [
     sameOriginAdminApp(),
     vue(),

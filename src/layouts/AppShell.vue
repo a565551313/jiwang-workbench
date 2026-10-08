@@ -48,8 +48,8 @@ async function signOut() {
 
       <div class="sidebar-spacer"></div>
       <div class="provider-card">
-        <div class="provider-card-top"><span class="live-dot"></span><span>原型演示模式</span><Sparkles :size="15" /></div>
-        <p>真实图像模型尚未接入。生成过程由浏览器本地 Mock 完成。</p>
+        <div class="provider-card-top"><span class="live-dot"></span><span>云端模型创作</span><Sparkles :size="15" /></div>
+        <p>从已启用模型中选择；开始前显示价格，失败自动退回汪币。</p>
       </div>
       <div class="sidebar-bottom">
         <div class="side-user" v-if="auth.isSignedIn">

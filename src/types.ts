@@ -19,6 +19,10 @@ export interface GenerationJob {
   title: string
   topic: string
   status: 'queued' | 'processing' | 'completed' | 'failed'
+  modelId?: string
+  modelName?: string
+  priceCoins?: number
+  progress?: number
   createdAt: string
   finishedAt?: string
   assetCount?: number
