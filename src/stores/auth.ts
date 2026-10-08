@@ -34,11 +34,24 @@ export const useAuthStore = defineStore('auth', () => {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { display_name: displayName } },
+      options: {
+        data: { display_name: displayName },
+        emailRedirectTo: window.location.origin,
+      },
     })
     if (error) throw error
     if (data.session) user.value = data.user
     return { confirmationRequired: !data.session }
+  }
+
+  async function resendConfirmation(email: string) {
+    if (!supabase || !supabaseConfigured) throw new Error('请先设置 Supabase 项目配置')
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    })
+    if (error) throw error
   }
 
   async function signOut() {
@@ -49,5 +62,5 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
   }
 
-  return { user, ready, isSignedIn, init, signIn, signUp, signOut }
+  return { user, ready, isSignedIn, init, signIn, signUp, resendConfirmation, signOut }
 })

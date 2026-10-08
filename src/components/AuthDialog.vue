@@ -41,6 +41,23 @@ async function submit() {
     busy.value = false
   }
 }
+
+async function resendConfirmation() {
+  const targetEmail = email.value.trim()
+  if (!targetEmail) {
+    ElMessage.warning('请先填写注册邮箱')
+    return
+  }
+  busy.value = true
+  try {
+    await auth.resendConfirmation(targetEmail)
+    ElMessage.success('验证邮件已重新发送，请查收邮箱')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '验证邮件发送失败，请稍后重试')
+  } finally {
+    busy.value = false
+  }
+}
 </script>
 
 <template>
@@ -64,6 +81,9 @@ async function submit() {
       </el-form-item>
       <el-button class="primary-button auth-submit" type="primary" :loading="busy" :disabled="!supabaseConfigured" @click="submit">
         {{ mode === 'login' ? '邮箱登录' : '注册并继续' }}
+      </el-button>
+      <el-button v-if="mode === 'login'" class="auth-resend" link type="primary" :loading="busy" :disabled="!supabaseConfigured" @click="resendConfirmation">
+        还没收到验证邮件？重新发送
       </el-button>
     </el-form>
     <p class="auth-switch">
