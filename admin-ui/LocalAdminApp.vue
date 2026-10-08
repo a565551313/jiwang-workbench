@@ -20,12 +20,12 @@ async function readResponse(response: Response) {
 async function restoreSession() {
   checking.value = true
   try {
-    const response = await fetch('/__admin/session', { cache: 'no-store', credentials: 'same-origin' })
+    const response = await fetch('/api/admin/session', { cache: 'no-store', credentials: 'same-origin' })
     const result = await readResponse(response)
-    if (!response.ok) throw new Error(result.message || '无法连接本机管理服务')
+    if (!response.ok) throw new Error(result.message || '无法连接管理服务')
     authenticated.value = result.authenticated === true
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '无法连接本机管理服务'
+    error.value = cause instanceof Error ? cause.message : '无法连接管理服务'
   } finally {
     checking.value = false
   }
@@ -34,12 +34,12 @@ async function restoreSession() {
 async function signIn() {
   error.value = ''
   if (!username.value.trim() || !password.value) {
-    error.value = '请输入本机管理账号和密码。'
+    error.value = '请输入管理员账号和密码。'
     return
   }
   busy.value = true
   try {
-    const response = await fetch('/__admin/login', {
+    const response = await fetch('/api/admin/login', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -59,7 +59,7 @@ async function signIn() {
 async function signOut() {
   busy.value = true
   try {
-    await fetch('/__admin/logout', { method: 'POST', credentials: 'same-origin' })
+    await fetch('/api/admin/logout', { method: 'POST', credentials: 'same-origin' })
   } finally {
     await auth.signOut().catch(() => undefined)
     authenticated.value = false
@@ -75,33 +75,33 @@ onMounted(() => { void restoreSession() })
 <template>
   <main v-if="checking" class="local-admin-loading">
     <LoaderCircle :size="24" class="local-admin-spin" />
-    <span>正在检查本机登录状态…</span>
+    <span>正在检查管理后台登录状态…</span>
   </main>
 
   <main v-else-if="!authenticated" class="local-admin-login-page">
     <section class="local-admin-login-card" aria-labelledby="local-admin-title">
       <div class="local-admin-login-mark"><ShieldCheck :size="23" /></div>
-      <div class="local-admin-kicker">JIWANG · LOCAL ONLY</div>
-      <h1 id="local-admin-title">本机管理端</h1>
-      <p class="local-admin-login-copy">此入口只监听本机回环地址。请使用独立于用户站的管理账号登录。</p>
+      <div class="local-admin-kicker">JIWANG · ADMIN</div>
+      <h1 id="local-admin-title">管理员登录</h1>
+      <p class="local-admin-login-copy">管理后台使用独立于前台用户邮箱账号的管理员账号。登录后将在当前域名下建立安全会话。</p>
       <form class="local-admin-form" @submit.prevent="signIn">
-        <label for="local-admin-username">管理账号</label>
+        <label for="local-admin-username">管理员账号</label>
         <input id="local-admin-username" v-model="username" name="username" type="text" autocomplete="username" autofocus />
-        <label for="local-admin-password">管理密码</label>
+        <label for="local-admin-password">管理员密码</label>
         <input id="local-admin-password" v-model="password" name="password" type="password" autocomplete="current-password" />
         <p v-if="error" class="local-admin-error" role="alert">{{ error }}</p>
         <button class="local-admin-submit" type="submit" :disabled="busy">
           {{ busy ? '正在验证…' : '登录管理后台' }}
         </button>
       </form>
-      <p class="local-admin-footnote">账号只从本机 <code>.env.admin.local</code> 读取；管理会话为 HttpOnly Cookie，不保存到浏览器本地存储。</p>
+      <p class="local-admin-footnote">管理员账号由部署环境配置；登录状态保存在 HttpOnly 安全 Cookie 中，不写入浏览器本地存储。</p>
     </section>
   </main>
 
   <div v-else class="local-admin-shell">
     <header class="local-admin-topbar">
-      <div class="local-admin-brand"><span class="local-admin-brand-icon"><ShieldCheck :size="17" /></span><span><b>极汪</b><small>本机管理端</small></span></div>
-      <div class="local-admin-topbar-right"><span class="local-only-pill"><i></i>仅本机</span><button class="local-admin-logout" type="button" :disabled="busy" @click="signOut"><LogOut :size="15" />退出管理端</button></div>
+      <div class="local-admin-brand"><span class="local-admin-brand-icon"><ShieldCheck :size="17" /></span><span><b>极汪</b><small>管理后台</small></span></div>
+      <div class="local-admin-topbar-right"><span class="admin-security-pill"><i></i>管理员专属</span><button class="local-admin-logout" type="button" :disabled="busy" @click="signOut"><LogOut :size="15" />退出管理端</button></div>
     </header>
     <AdminView />
   </div>

@@ -25,9 +25,9 @@
 .local-admin-brand b{font-size:13px;line-height:1.1}
 .local-admin-brand small{color:#8290a4;font-size:9px;letter-spacing:.05em}
 .local-admin-topbar-right{display:flex;align-items:center;gap:15px}
-.local-only-pill{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #e3eaf3;border-radius:99px;color:#65768e;font-size:10px}
-.local-only-pill i{width:6px;height:6px;border-radius:50%;background:#29a477}
+.admin-security-pill{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #e4ecf8;border-radius:999px;background:#f7faff;color:#6280aa;font-size:9px;font-weight:700}
+.admin-security-pill i{width:6px;height:6px;border-radius:50%;background:#4b83db;display:block}
 .local-admin-logout{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:#718096;font-size:11px;cursor:pointer}
 .local-admin-logout:hover:not(:disabled){background:#f2f5fa;color:#34445c}
 .local-admin-logout:disabled{opacity:.5;cursor:wait}
-@media(max-width:540px){.local-admin-login-card{padding:27px 22px}.local-admin-topbar{height:54px;padding:0 14px}.local-admin-topbar-right{gap:5px}.local-only-pill{font-size:9px}.local-admin-logout{font-size:10px;padding:6px}}
+@media(max-width:540px){.local-admin-login-card{padding:27px 22px}.local-admin-topbar{height:54px;padding:0 14px}.local-admin-topbar-right{gap:5px}.admin-security-pill{font-size:8px;padding:5px 7px}.local-admin-logout{font-size:10px;padding:6px}}

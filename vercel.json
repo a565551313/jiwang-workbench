@@ -1,5 +1,11 @@
 {
+  "redirects": [
+    { "source": "/admin-ui", "destination": "/admin", "permanent": false },
+    { "source": "/admin-ui/:path*", "destination": "/admin", "permanent": false }
+  ],
   "rewrites": [
+    { "source": "/admin", "destination": "/admin-ui/index.html" },
+    { "source": "/admin/:path*", "destination": "/admin-ui/index.html" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

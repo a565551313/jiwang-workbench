@@ -175,13 +175,13 @@ async function resetSettings() {
       <header class="admin-heading">
         <div><div class="admin-eyebrow"><span class="admin-eyebrow-mark"><ShieldCheck :size="14" /></span>JIWANG CONTROL CENTER</div><h1>管理后台</h1><p>产品运营、任务监控与创作配置。</p></div>
         <div class="admin-heading-actions">
-          <span class="admin-mode" :class="{ 'is-demo': workspace?.demo }"><i></i>{{ workspace?.demo ? '本地演示数据' : 'Supabase 云端数据' }}</span>
+          <span class="admin-mode" :class="{ 'is-demo': workspace?.demo }"><i></i>{{ workspace?.demo ? '演示数据' : 'Supabase 云端数据' }}</span>
           <el-button class="admin-quiet" @click="refresh"><RefreshCw :size="14" />刷新</el-button>
         </div>
       </header>
 
       <el-alert v-if="workspace?.demo" class="admin-notice" type="info" :closable="false" show-icon>
-        当前为本机演示模式：后台设置只保存在此浏览器，示例用户与统计不代表真实线上数据。配置 Supabase 并应用管理后台迁移后，管理员可管理云端数据。
+        当前为演示模式：后台设置只保存在此浏览器，示例用户与统计不代表真实线上数据。配置 Supabase 并应用管理后台迁移后，管理员可管理云端数据。
       </el-alert>
       <el-alert v-else class="admin-notice" type="warning" :closable="false" show-icon>
         管理后台已连接云端。真实模型推理与异步 worker 尚未接入；模型 API 密钥必须保存在服务端 Secret 中，不会存进浏览器配置表。
@@ -213,7 +213,7 @@ async function resetSettings() {
             <article class="admin-panel health-panel">
               <div class="admin-panel-head"><div><h3>系统健康度</h3><p>原型环境服务接入状态</p></div><span class="health-icon"><Activity :size="16" /></span></div>
               <div class="health-row"><span><i class="health-check"></i>邮箱认证与资料库</span><b>{{ workspace.demo ? '演示' : '已连接' }}</b></div>
-              <div class="health-row"><span><i class="health-check"></i>任务与素材存储</span><b>{{ workspace.demo ? '本地' : '已连接' }}</b></div>
+              <div class="health-row"><span><i class="health-check"></i>任务与素材存储</span><b>{{ workspace.demo ? '演示' : '已连接' }}</b></div>
               <div class="health-row"><span><i class="health-pending"></i>真实图像生成 Worker</span><b class="pending-text">未接入</b></div>
               <div class="health-summary"><span><History :size="15" /> 近 24 小时任务</span><strong>{{ money(workspace.metrics.todayJobs) }}</strong></div>
               <div class="health-meter"><span :style="{ width: `${Math.max(8, 100 - Math.min(Number.parseFloat(failureRate), 100))}%` }"></span></div><small class="health-footnote">失败率 {{ failureRate }} · 当前数据不包含真实推理延迟</small>
