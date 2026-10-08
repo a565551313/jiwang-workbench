@@ -2,7 +2,7 @@
 --
 -- 规则（均以服务器时间计算；每日上限按北京时间自然日）：
 --   1. 从未用于生成的参考图：上传 7 天后删除。
---   2. 用于生成过的参考图：最后一次使用后 30 天删除；删除后不能再点「重新生成」（不扣费）。
+--   2. 用于生成过的参考图：最后一次使用（包括重新生成）后 30 天删除；删除后不能再点「重新生成」（不扣费）。
 --   3. 每位用户同时最多 2 套进行中的任务（queued / processing）。
 --   4. 每位用户每个北京时间自然日最多开始 10 套；「重新生成」也计入。
 --
@@ -156,6 +156,7 @@ $$;
 
 -- 找出应当删除的参考图（只读，不删除）。
 -- 未使用：上传超过 7 天；已使用：最后一次使用超过 30 天。
+-- “最后一次使用”包括重新生成：每次任务创建或重新排队（queued_at 被更新）都算一次使用，取两者中较晚的时间。
 create or replace function public.worker_expired_reference_images(p_limit integer default 100)
 returns table (result_user_id uuid, result_storage_path text)
 language sql
@@ -166,7 +167,7 @@ as $$
   select a.user_id, a.storage_path
     from public.assets a
     left join lateral (
-      select max(j.created_at) as last_used_at
+      select max(greatest(j.created_at, j.queued_at)) as last_used_at
         from public.generation_jobs j
        where j.reference_path = a.storage_path
     ) u on true

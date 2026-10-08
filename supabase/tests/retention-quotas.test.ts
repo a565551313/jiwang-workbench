@@ -252,6 +252,20 @@ describe('参考图保留期限', () => {
     expect(rows.map((row) => row.result_storage_path).sort()).toEqual([unusedOld, usedLongAgo].sort())
   })
 
+  it('重新生成会刷新 30 天计时：任务创建于 35 天前，今天刚重新生成，参考图不能被判为过期', async () => {
+    const user = await createUser()
+    const reference = await createReference(user, 40)
+    const job = await createJobRow(user, reference, { status: 'failed', createdDaysAgo: 35 })
+    await retry(job)
+    await setStatus(job, 'completed')
+    await service()
+    const { rows } = await db.query<{ result_storage_path: string }>(
+      'select result_storage_path from public.worker_expired_reference_images(1000) where result_user_id = $1',
+      [user],
+    )
+    expect(rows.map((row) => row.result_storage_path)).not.toContain(reference)
+  })
+
   it('删除参考图记录只影响指定路径，任务记录保留', async () => {
     const user = await createUser()
     const unusedOld = await createReference(user, 8)
