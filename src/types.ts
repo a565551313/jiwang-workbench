@@ -14,18 +14,24 @@ export interface WorkAsset {
   cellIndex?: number
 }
 
+/** `partial` means some cells were delivered and settled proportionally; the rest of the charge was refunded. */
+export type GenerationStatus = 'queued' | 'processing' | 'completed' | 'partial' | 'failed'
+
 export interface GenerationJob {
   id: string
   title: string
   topic: string
-  status: 'queued' | 'processing' | 'completed' | 'failed'
+  status: GenerationStatus
   modelId?: string
   modelName?: string
   priceCoins?: number
   progress?: number
+  /** Images actually delivered for this job (0–16). */
+  completedCount?: number
+  /** Attempt number; a retry is a new attempt with its own charge and refund. */
+  attempt?: number
   createdAt: string
   finishedAt?: string
-  assetCount?: number
   errorMessage?: string
 }
 

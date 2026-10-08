@@ -7,7 +7,7 @@ vi.mock('./supabase', () => ({
   supabaseConfigured: true,
 }))
 
-import { explainGenerationError, explainPreparationError, loadEnabledImageModels } from './generation'
+import { defaultPublicFeatures, explainGenerationError, explainPreparationError, loadEnabledImageModels, loadPublicFeatures } from './generation'
 
 const modelRow = {
   id: '41223bf7-d355-42c4-800f-7b31ae33267b',
@@ -81,3 +81,19 @@ describe('生成失败提示', () => {
     expect(explainPreparationError('参考图云端保存', 'Bucket not found')).toContain('jiwang-private')
   })
 })
+
+describe('站点功能开关', () => {
+  beforeEach(() => rpc.mockReset())
+
+  it('读取后台开关并映射为前台字段', async () => {
+    rpc.mockResolvedValueOnce({ data: { signup: false, customThemes: true, maintenance: true }, error: null })
+    await expect(loadPublicFeatures()).resolves.toEqual({ signup: false, customThemes: true, maintenance: true })
+    expect(rpc).toHaveBeenCalledWith('public_site_features')
+  })
+
+  it('读取失败时保持默认开放，维护状态以服务端拦截为准', async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: { message: 'boom' } })
+    await expect(loadPublicFeatures()).resolves.toEqual(defaultPublicFeatures)
+  })
+})
+

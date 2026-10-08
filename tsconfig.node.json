@@ -13,5 +13,5 @@
     "strict": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "server/**/*.ts", "api/**/*.ts"]
+  "include": ["vite.config.ts", "server/**/*.ts", "api/**/*.ts", "supabase/tests/**/*.ts", "supabase/functions/jiwang-generate/shared.ts"]
 }

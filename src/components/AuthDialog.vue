@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
 import { supabaseConfigured } from '../lib/supabase'
+import { defaultPublicFeatures, loadPublicFeatures, type PublicSiteFeatures } from '../lib/generation'
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
@@ -14,8 +15,14 @@ const displayName = ref('')
 const busy = ref(false)
 const authError = ref('')
 const visible = ref(false)
+const features = ref<PublicSiteFeatures>(defaultPublicFeatures)
 watch(() => props.modelValue, (value) => { visible.value = value })
 watch(visible, (value) => emit('update:modelValue', value))
+onMounted(async () => {
+  features.value = await loadPublicFeatures()
+  // A signup switch that is off in the admin console also hides the sign-up form.
+  if (!features.value.signup && mode.value === 'signup') mode.value = 'login'
+})
 
 function humanizeAuthError(error: unknown) {
   const message = error instanceof Error ? error.message : ''
@@ -32,6 +39,10 @@ async function submit() {
   }
   if (password.value.length < 8) {
     ElMessage.warning('密码至少需要 8 位')
+    return
+  }
+  if (mode.value === 'signup' && !features.value.signup) {
+    ElMessage.warning('当前暂未开放注册，请使用已有账号登录')
     return
   }
   busy.value = true
@@ -98,7 +109,7 @@ async function resendConfirmation() {
     </el-form>
     <p class="auth-switch">
       {{ mode === 'login' ? '还没有账号？' : '已经有账号？' }}
-      <button type="button" @click="mode = mode === 'login' ? 'signup' : 'login'">{{ mode === 'login' ? '免费注册' : '返回登录' }}</button>
+      <button v-if="features.signup || mode === 'signup'" type="button" @click="mode = mode === 'login' ? 'signup' : 'login'">{{ mode === 'login' ? '免费注册' : '返回登录' }}</button>
     </p>
     <div class="auth-footnote"><span class="tiny-shield">✓</span> 邮箱认证 · 私有素材 · 按账号隔离</div>
   </el-dialog>

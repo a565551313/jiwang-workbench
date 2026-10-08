@@ -1,4 +1,5 @@
 import { supabase, supabaseConfigured } from './supabase'
+import type { GenerationStatus } from '../types'
 
 export interface PublicImageModel {
   id: string
@@ -6,6 +7,14 @@ export interface PublicImageModel {
   name: string
   priceCoins: number
 }
+
+export interface PublicSiteFeatures {
+  signup: boolean
+  customThemes: boolean
+  maintenance: boolean
+}
+
+export const defaultPublicFeatures: PublicSiteFeatures = { signup: true, customThemes: true, maintenance: false }
 
 export interface StickerGenerationInput {
   jobId: string
@@ -19,9 +28,21 @@ export interface StickerGenerationInput {
 
 export interface StickerGenerationResult {
   jobId: string
+  status: 'completed' | 'partial'
   images: Array<{ cellIndex: number; url: string }>
+  deliveredCount: number
+  refundedCoins?: number
   balance?: number
   priceCoins?: number
+  reused?: boolean
+}
+
+export interface GenerationStatusRow {
+  status: GenerationStatus
+  progress: number
+  completed_count: number
+  attempt: number
+  error_message: string | null
 }
 
 export class GenerationHttpError extends Error {
@@ -124,6 +145,23 @@ export function loadEnabledImageModels(): Promise<PublicImageModel[]> {
   return sharedRequest
 }
 
+/** Site switches that the front end can honour. Failures fall back to "enabled"; the server enforces maintenance. */
+export async function loadPublicFeatures(): Promise<PublicSiteFeatures> {
+  if (!supabase || !supabaseConfigured) return defaultPublicFeatures
+  try {
+    const { data, error } = await supabase.rpc('public_site_features')
+    if (error || !data || typeof data !== 'object') return defaultPublicFeatures
+    const row = data as Partial<PublicSiteFeatures>
+    return {
+      signup: row.signup !== false,
+      customThemes: row.customThemes !== false,
+      maintenance: row.maintenance === true,
+    }
+  } catch {
+    return defaultPublicFeatures
+  }
+}
+
 export async function loadWalletBalance(userId: string): Promise<number> {
   if (!supabase || !supabaseConfigured) return 0
   const { data, error } = await supabase.from('wallet_balances').select('balance').eq('user_id', userId).maybeSingle()
@@ -131,11 +169,14 @@ export async function loadWalletBalance(userId: string): Promise<number> {
   return Number(data?.balance ?? 0)
 }
 
-export async function loadGenerationStatus(jobId: string) {
+export async function loadGenerationStatus(jobId: string): Promise<GenerationStatusRow | null> {
   if (!supabase || !supabaseConfigured) return null
-  const { data, error } = await supabase.from('generation_jobs').select('status,progress,error_message').eq('id', jobId).maybeSingle()
+  const { data, error } = await supabase.from('generation_jobs')
+    .select('status,progress,completed_count,attempt,error_message')
+    .eq('id', jobId)
+    .maybeSingle()
   if (error) throw new Error(error.message)
-  return data as { status: 'queued' | 'processing' | 'completed' | 'failed'; progress: number; error_message: string | null } | null
+  return data as GenerationStatusRow | null
 }
 
 export async function loadGenerationImages(jobId: string, userId: string): Promise<Array<{ cellIndex: number; url: string }>> {
@@ -160,31 +201,45 @@ function errorMessage(value: unknown): string | undefined {
   return typeof error.error === 'string' ? error.error : undefined
 }
 
-export async function generateStickers(input: StickerGenerationInput, onProgress?: (progress: number) => void): Promise<StickerGenerationResult> {
+async function invokeGenerationFunction(body: Record<string, unknown>): Promise<StickerGenerationResult> {
+  if (!supabase || !supabaseConfigured) throw new Error('真实生成服务尚未配置 Supabase')
+  const { data, error } = await supabase.functions.invoke('jiwang-generate', { body })
+  if (error) {
+    if (error.context instanceof Response) {
+      const payload = await error.context.clone().json().catch(() => null)
+      throw new GenerationHttpError(errorMessage(payload) || error.message, error.context.status)
+    }
+    throw new Error(error.message)
+  }
+  const result = data as StickerGenerationResult & { error?: string }
+  if (result.error) throw new Error(result.error)
+  return result
+}
+
+/** Start a new generation. `onProgress` receives the server progress and the number of images already delivered. */
+export async function generateStickers(
+  input: StickerGenerationInput,
+  onProgress?: (progress: number, completed: number) => void,
+): Promise<StickerGenerationResult> {
   if (!supabase || !supabaseConfigured) throw new Error('真实生成服务尚未配置 Supabase')
   let active = true
   const updateProgress = async () => {
     try {
       const status = await loadGenerationStatus(input.jobId)
-      if (status && active) onProgress?.(Number(status.progress || 0))
+      if (status && active) onProgress?.(Number(status.progress || 0), Number(status.completed_count || 0))
     } catch { /* progress refresh is best-effort; the generation request remains authoritative */ }
   }
   const timer = window.setInterval(() => { void updateProgress() }, 1800)
   void updateProgress()
   try {
-    const { data, error } = await supabase.functions.invoke('jiwang-generate', { body: input })
-    if (error) {
-      if (error.context instanceof Response) {
-        const payload = await error.context.clone().json().catch(() => null)
-        throw new GenerationHttpError(errorMessage(payload) || error.message, error.context.status)
-      }
-      throw new Error(error.message)
-    }
-    const result = data as StickerGenerationResult & { error?: string }
-    if (result.error) throw new Error(result.error)
-    return result
+    return await invokeGenerationFunction({ ...input })
   } finally {
     active = false
     window.clearInterval(timer)
   }
+}
+
+/** Re-run a failed job as a new attempt. The caller must show the price and get confirmation first. */
+export function retryGenerationJob(jobId: string): Promise<StickerGenerationResult> {
+  return invokeGenerationFunction({ action: 'retry', jobId })
 }

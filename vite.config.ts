@@ -56,7 +56,8 @@ export default defineConfig({
   ],
   server: {
     host: '0.0.0.0',
-    allowedHosts: ['4173-it3xp7zqh3nv3o4it6efg-e90a42d4.us2.manus.computer'],
+    // Vite 默认只放行 localhost。沙箱预览使用 *.e2b.app 域名；其它部署域名可用 JIWANG_DEV_ALLOWED_HOSTS（逗号分隔）追加。
+    allowedHosts: ['.e2b.app', ...(process.env.JIWANG_DEV_ALLOWED_HOSTS ?? '').split(',').map((host) => host.trim()).filter(Boolean)],
   },
   build: {
     chunkSizeWarningLimit: 600,
