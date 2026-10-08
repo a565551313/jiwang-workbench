@@ -7,7 +7,7 @@ import {
   Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound, Plus, Pencil, Trash2,
 } from '@lucide/vue'
 import AuthDialog from '../components/AuthDialog.vue'
-import { adjustAdminWallet, defaultAdminSettings, fetchUpstreamImageModels, loadAdminWorkspace, requeueAdminJob, saveAdminProviderApiKey, saveAdminSettings, type AdminImageProvider, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
+import { adjustAdminWallet, defaultAdminSettings, fetchUpstreamImageModels, getProviderSaveIssues, loadAdminWorkspace, requeueAdminJob, saveAdminProviderApiKey, saveAdminSettings, type AdminImageProvider, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
 
@@ -36,6 +36,7 @@ const sections = [
 ]
 const workspace = ref<Awaited<ReturnType<typeof loadAdminWorkspace>> | null>(null)
 const settings = ref<AdminSettings>(JSON.parse(JSON.stringify(defaultAdminSettings)) as AdminSettings)
+const providerSaveIssues = computed(() => providerDraft.value ? getProviderSaveIssues(providerDraft.value, providerApiKey.value) : [])
 const themeText = computed({
   get: () => settings.value.themes.presets.join('\n'),
   set: (value: string) => { settings.value.themes.presets = value.split('\n').map((item) => item.trim()).filter(Boolean) },
@@ -177,17 +178,9 @@ async function saveProvider() {
     ElMessage.warning('模型数据升级尚未完成，当前配置为只读')
     return
   }
-  if (!provider.name.trim() || !provider.baseUrl.trim() || !provider.baseUrl.trim().startsWith('https://')) {
-    ElMessage.warning('请填写供应商名称和 HTTPS Base URL')
-    return
-  }
-  const modelIds = provider.models.map((model) => model.name.trim())
-  if (modelIds.some((name) => !name) || new Set(modelIds).size !== modelIds.length) {
-    ElMessage.warning('请填写模型 ID，且同一供应商下不能重复')
-    return
-  }
-  if (provider.models.some((model) => model.enabled && (!provider.secretConfigured && !providerApiKey.value.trim() || model.priceCoins < 1 || model.priceCoins > 100000))) {
-    ElMessage.warning('启用模型需要可用 API Key，并设置 1–100000 的整数汪币价格')
+  const issues = getProviderSaveIssues(provider, providerApiKey.value)
+  if (issues.length) {
+    ElMessage.warning(issues[0])
     return
   }
   if (providerApiKey.value.trim() && workspace.value.demo) {
@@ -423,6 +416,10 @@ async function resetSettings() {
           <label class="provider-form-wide"><span>API Key</span><el-input v-model="providerApiKey" type="password" show-password autocomplete="new-password" :disabled="workspace?.demo" :placeholder="providerDraft.secretConfigured ? '留空保持已保存的密钥不变' : '输入上游 API Key'" /><small>{{ workspace?.demo ? '演示模式无法安全保存密钥，请连接 Supabase 后配置。' : providerDraft.secretConfigured ? '密钥已保存在 Vault；此处不会显示原文。输入新密钥可替换。' : '密钥仅会加密保存到 Supabase Vault，不会保存到浏览器。' }}</small></label>
         </div>
         <div class="provider-model-toolbar"><div><strong>模型列表</strong><small>启用状态可先勾选；保存前需填写模型 ID、正数汪币价格并配置 API Key</small></div><div><el-button class="admin-quiet" :loading="fetchingModels" :disabled="workspace?.demo || !workspace?.providerModelSchemaReady" @click="fetchModels"><RefreshCw :size="14" />获取模型</el-button><el-button class="admin-quiet" :disabled="!workspace?.demo && !workspace?.providerModelSchemaReady" @click="addProviderModel"><Plus :size="14" />手动添加</el-button></div></div>
+        <el-alert v-if="providerSaveIssues.length" class="provider-save-warning" type="warning" :closable="false" show-icon>
+          <template #title>当前配置尚不能保存</template>
+          <div v-for="issue in providerSaveIssues" :key="issue">{{ issue }}</div>
+        </el-alert>
         <div v-if="fetchingModels" class="provider-fetching"><LoaderCircle class="spin" :size="15" />正在从上游获取模型列表…</div>
         <div v-else-if="providerDraft.models.length" class="provider-edit-list">
           <div class="provider-edit-header"><span>模型 ID</span><span>额外汪币</span><span>启用</span><span>删除</span></div>

@@ -50,6 +50,32 @@ export interface AdminImageProvider {
   models: AdminImageModel[]
 }
 
+export function getProviderSaveIssues(provider: AdminImageProvider, apiKey: string): string[] {
+  const issues: string[] = []
+  const trimmedKey = apiKey.trim()
+  const modelIds = provider.models.map((model) => model.name.trim())
+
+  if (!provider.name.trim()) issues.push('请填写供应商名称。')
+  if (!provider.baseUrl.trim().startsWith('https://')) issues.push('请填写有效的 HTTPS Base URL。')
+  if (modelIds.some((name) => !name)) issues.push('请填写每个模型 ID。')
+  if (new Set(modelIds).size !== modelIds.length) issues.push('同一供应商下的模型 ID 不能重复。')
+  if (trimmedKey && (trimmedKey.length < 8 || apiKey.length > 8192)) issues.push('API Key 长度无效。')
+
+  const enabledModels = provider.models
+    .map((model, index) => ({ model, index }))
+    .filter(({ model }) => model.enabled)
+  if (enabledModels.length && !provider.secretConfigured && !trimmedKey) {
+    issues.push('已勾选模型，但供应商 API Key 尚未保存；请先填写 API Key。')
+  }
+  for (const { model, index } of enabledModels) {
+    if (!Number.isInteger(model.priceCoins) || model.priceCoins < 1 || model.priceCoins > 100000) {
+      const label = model.name.trim() || `第 ${index + 1} 个模型`
+      issues.push(`模型「${label}」已勾选，但汪币价格无效；请设置 1–100000 的整数价格后再保存。`)
+    }
+  }
+  return issues
+}
+
 export interface AdminSettings {
   themes: { presets: string[] }
   prompts: { sticker: string }
