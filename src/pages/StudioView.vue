@@ -8,7 +8,7 @@ import { makeDraft, themeGroups, titleForTopic } from '../lib/drafts'
 import { makeZip } from '../lib/archive'
 import { persistReference } from '../lib/repository'
 import { supabase, supabaseConfigured } from '../lib/supabase'
-import { explainGenerationError, explainPreparationError, generateStickers, loadEnabledImageModels, loadGenerationImages, loadGenerationStatus, loadWalletBalance, type PublicImageModel } from '../lib/generation'
+import { explainGenerationError, explainPreparationError, GenerationHttpError, generateStickers, loadEnabledImageModels, loadGenerationImages, loadGenerationStatus, loadWalletBalance, type PublicImageModel } from '../lib/generation'
 import type { DraftCell, GenerationJob, GenerationOptions } from '../types'
 
 const router = useRouter()
@@ -45,6 +45,10 @@ const visibleThemes = computed(() => themeGroups.find((group) => group.label ===
 const outputTitle = computed(() => titleForTopic(topic.value || themeDescription.value, activeTheme.value))
 const selectedModel = computed(() => models.value.find((model) => model.id === selectedModelId.value) || null)
 const generationCost = computed(() => selectedModel.value?.priceCoins ?? 0)
+const completedImageCount = computed(() => {
+  if (latestJob.value?.status === 'completed') return 16
+  return Math.max(0, Math.min(16, Math.floor((progress.value - 10) / 5)))
+})
 
 function selectTheme(theme: string) {
   activeTheme.value = theme
@@ -185,7 +189,11 @@ async function generate() {
       topic: job.topic,
       cells: draft.value.map((cell) => ({ caption: cell.caption.trim(), visual: cell.visual.trim() })),
       options: { ...options },
-    }, (value) => { progress.value = Math.max(progress.value, value) })
+    }, (value) => {
+      progress.value = Math.max(progress.value, value)
+      if (progress.value >= 95) progressText.value = '16 张图片已返回，正在保存素材并完成任务'
+      else if (progress.value >= 10) progressText.value = `模型已返回 ${completedImageCount.value}/16 张，正在继续生成`
+    })
     const images = result.images.slice().sort((a, b) => a.cellIndex - b.cellIndex)
     if (images.length !== 16 || images.some((image) => !image.url)) throw new Error('生成任务已返回，但素材数量不完整；请查看任务记录')
     generatedCells.value = images.map((image) => image.url)
@@ -222,6 +230,11 @@ async function generate() {
         failureMessage.value = explainGenerationError(message)
         progressText.value = '请求已返回错误，但任务/退款状态尚未确认；请勿重复提交'
         ElMessage.error(failureMessage.value.split('\n')[0] || '任务和退款状态尚未确认')
+      } else if (error instanceof GenerationHttpError) {
+        failureMessage.value = `${explainGenerationError(message)}\n\n服务端已返回 HTTP ${error.status}，但任务状态仍显示处理中。请勿重复提交；稍后刷新任务历史和余额，确认失败/退款状态。`
+        progressText.value = '生成服务已返回错误；任务状态与退款仍在确认，请勿重试'
+        await refreshBalance()
+        ElMessage.error(failureMessage.value.split('\n')[0] || '生成服务返回错误')
       } else {
         failureMessage.value = '浏览器与生成服务的连接中断，但云端任务仍在处理。请勿再次提交同一套生成；稍后刷新任务历史查看结果。'
         progressText.value = '连接中断；云端仍在处理，请勿重复提交'
@@ -362,17 +375,22 @@ onBeforeUnmount(() => {
         <section class="preview-card">
           <div class="preview-header"><div><div class="preview-eyebrow">PREVIEW CANVAS</div><h2>你的 16 格预览</h2></div><span class="preview-mode"><span></span>云端模型</span></div>
           <div class="preview-title-row"><span class="preview-title">{{ outputTitle }}</span><span class="preview-count">{{ generatedCells.length || 0 }}/16</span></div>
+          <div v-if="loading || latestJob" class="generation-status" :class="{ 'is-active': loading, 'has-error': Boolean(failureMessage) }" aria-live="polite">
+            <div class="generation-status-heading">
+              <span class="generation-status-icon"><LoaderCircle v-if="loading" class="spin" :size="18" /><Check v-else-if="latestJob?.status === 'completed'" :size="18" /><X v-else-if="latestJob?.status === 'failed'" :size="18" /><Clock3 v-else :size="18" /></span>
+              <div class="generation-status-copy"><strong>{{ loading ? '正在生成这套贴图' : latestJob?.status === 'completed' ? '生成完成' : latestJob?.status === 'failed' ? '生成未完成' : '任务状态待确认' }}</strong><span>{{ progressText }}</span></div>
+              <strong class="generation-status-percent">{{ progress }}%</strong>
+            </div>
+            <el-progress :percentage="progress" :show-text="false" :stroke-width="7" color="#4f86e8" />
+            <div class="generation-status-meta"><span>{{ latestJob?.status === 'failed' ? `失败前模型已返回 ${completedImageCount}/16 张` : `模型已返回 ${completedImageCount}/16 张` }}</span><span v-if="loading">进度自动刷新；请保持本页打开</span><span v-else-if="latestJob?.status === 'processing' || latestJob?.status === 'queued'">状态确认期间请勿重复提交</span><span v-else-if="latestJob?.status === 'completed'">图片已保存到私有素材库</span></div>
+            <div v-if="failureMessage" class="generation-error" role="alert">{{ failureMessage }}</div>
+          </div>
           <div class="preview-grid" :class="{ 'has-results': generatedCells.length === 16 }">
-            <div v-for="(cell, index) in draft" :key="index" class="preview-tile">
+            <div v-for="(cell, index) in draft" :key="index" class="preview-tile" :class="{ 'is-generating': loading && !generatedCells[index] }">
               <img v-if="generatedCells[index]" :src="generatedCells[index]" :alt="cell.caption" />
-              <template v-else><div class="preview-doodle" :style="{ '--tile-index': index }"><span>{{ ['✦', '♡', '✿', '☁'][index % 4] }}</span><i></i></div><small>{{ cell.caption || '短句' }}</small></template>
+              <template v-else><div class="preview-doodle" :style="{ '--tile-index': index }"><span>{{ ['✦', '♡', '✿', '☁'][index % 4] }}</span><i></i></div><small>{{ loading ? '正在生成…' : cell.caption || '短句' }}</small></template>
               <span class="tile-number">{{ String(index + 1).padStart(2, '0') }}</span>
             </div>
-          </div>
-          <div v-if="loading || latestJob" class="generation-status">
-            <div class="generation-status-top"><span><LoaderCircle v-if="loading" class="spin" :size="15" /><Check v-else-if="latestJob?.status === 'completed'" :size="15" /><X v-else-if="latestJob?.status === 'failed'" :size="15" /><Clock3 v-else :size="15" />{{ progressText }}</span><strong>{{ progress }}%</strong></div>
-            <el-progress :percentage="progress" :show-text="false" :stroke-width="5" color="#4f86e8" />
-            <div v-if="failureMessage" class="generation-error" role="alert">{{ failureMessage }}</div>
           </div>
           <el-button v-if="generatedCells.length !== 16" class="primary-button generate-button" type="primary" :loading="loading" :disabled="modelsLoading || !selectedModel || !auth.user || balanceLoading || balanceLoadFailed || walletBalance < generationCost || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在生成并结算…' : modelsLoading ? '正在读取模型…' : modelLoadFailed ? '模型列表暂不可用' : balanceLoading ? '正在读取余额…' : balanceLoadFailed ? '请先重新读取余额' : !auth.user ? '请先登录' : walletBalance < generationCost ? '汪币余额不足' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
           <div v-else class="result-actions"><el-button class="primary-button" type="primary" :loading="zipLoading" @click="downloadZip"><Download :size="16" />下载 16 张 PNG</el-button><el-button class="text-result-button" @click="router.push('/assets')">打开素材库</el-button></div>

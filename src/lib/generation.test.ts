@@ -64,6 +64,7 @@ describe('生成失败提示', () => {
 
   it('对限流、余额不足和超时分别给出下一步', () => {
     expect(explainGenerationError('上游模型接口请求失败（429）')).toContain('速率限制')
+    expect(explainGenerationError('Responses API 上游接口返回 HTTP 402，上游账户额度或付款状态不足。\n建议：请管理员检查供应商账户余额、配额和计费状态。')).toContain('上游账户额度或付款状态不足')
     expect(explainGenerationError('汪币余额不足')).toContain('模型调用未开始')
     expect(explainGenerationError('请求超时')).toContain('不要立即重复提交')
   })

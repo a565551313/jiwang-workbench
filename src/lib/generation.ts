@@ -24,6 +24,13 @@ export interface StickerGenerationResult {
   priceCoins?: number
 }
 
+export class GenerationHttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'GenerationHttpError'
+  }
+}
+
 /** Turn transport, upstream and legacy server errors into actionable Chinese guidance. */
 export function explainGenerationError(value: unknown): string {
   const raw = typeof value === 'string'
@@ -169,7 +176,7 @@ export async function generateStickers(input: StickerGenerationInput, onProgress
     if (error) {
       if (error.context instanceof Response) {
         const payload = await error.context.clone().json().catch(() => null)
-        throw new Error(errorMessage(payload) || error.message)
+        throw new GenerationHttpError(errorMessage(payload) || error.message, error.context.status)
       }
       throw new Error(error.message)
     }
