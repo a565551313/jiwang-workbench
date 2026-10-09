@@ -1,5 +1,6 @@
 import { supabase, supabaseConfigured } from './supabase'
 import type { GenerationJob } from '../types'
+import { defaultThemePresetGroups, normalizeThemePresetGroups, type ThemePresetGroup } from './themePresets'
 
 export interface AdminUser {
   userId: string
@@ -93,6 +94,8 @@ export function getProviderSaveIssues(provider: AdminImageProvider, apiKey: stri
 
 export interface AdminSettings {
   prompts: { sticker: string }
+  /** Studio theme presets; the studio reads them through the public_theme_presets RPC. */
+  themePresets: ThemePresetGroup[]
   model: { providers: AdminImageProvider[] }
   features: { signup: boolean; customThemes: boolean; communitySubmissions: boolean; maintenance: boolean }
 }
@@ -108,6 +111,7 @@ export interface AdminWorkspace {
 
 export const defaultAdminSettings: AdminSettings = {
   prompts: { sticker: '生成一套统一角色设定的聊天表情。每格保持清晰轮廓、单一动作和易读情绪；透明背景，主体居中。主题：{{topic}}；单格描述：{{caption}}；画面：{{visual}}。' },
+  themePresets: defaultThemePresetGroups(),
   model: { providers: [] },
   features: { signup: true, customThemes: true, communitySubmissions: false, maintenance: false },
 }
@@ -201,6 +205,7 @@ function normalizeSettings(rows: Array<{ setting_key: string; value: unknown }>)
       : []
   return {
     prompts: { ...defaultAdminSettings.prompts, ...(values.prompts || {}) },
+    themePresets: normalizeThemePresetGroups(values.themePresets) ?? defaultThemePresetGroups(),
     model: { providers: providerList },
     features: { ...defaultAdminSettings.features, ...(values.features || {}) },
   }

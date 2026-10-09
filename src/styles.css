@@ -35,3 +35,30 @@
 @keyframes tile-generating-pulse{from{background:#fff;box-shadow:0 1px 2px rgba(34,52,38,.04)}to{background:#f5f8fe;box-shadow:0 0 0 2px rgba(79,134,232,.08)}}
 @keyframes tile-doodle-pulse{from{opacity:.58;transform:scale(.94)}to{opacity:1;transform:scale(1)}}
 @media(prefers-reduced-motion:reduce){.preview-tile.is-generating,.preview-tile.is-generating .preview-doodle{animation:none}}
+
+/* 生成过程：步骤条、过程记录、占位格扫光与逐张渐显 */
+.generation-steps{list-style:none;margin:12px 0 0;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.generation-steps li{display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;text-align:center;color:#a2aab6;font-size:9px;line-height:1.3}
+.generation-steps .step-dot{width:20px;height:20px;display:grid;place-items:center;border-radius:50%;background:#eef1f5;color:#a2aab6;border:1px solid #e1e6ee;transition:background .3s ease,color .3s ease,border-color .3s ease}
+.generation-steps .step-label{display:flex;flex-direction:column;gap:1px;overflow-wrap:anywhere}
+.generation-steps .step-label small{font-size:8px;color:#7b8492;font-variant-numeric:tabular-nums}
+.generation-steps li.done{color:#485972}
+.generation-steps li.done .step-dot{background:#2563eb;border-color:#2563eb;color:#fff}
+.generation-steps li.active{color:#29384d;font-weight:700}
+.generation-steps li.active .step-dot{background:#e7f0ff;border-color:#4f86e8;color:#2563eb}
+.generation-steps li.stopped{color:#b55145}
+.generation-steps li.stopped .step-dot{background:#fde9e5;border-color:#efcbc5;color:#b55145}
+.generation-log{list-style:none;margin:12px 0 0;padding:8px 10px;max-height:104px;overflow-y:auto;background:rgba(255,255,255,.7);border:1px solid #e3eaf5;border-radius:9px;font-size:9px;line-height:1.55;color:#5f6b7d}
+.generation-log li{display:flex;gap:8px;align-items:baseline}
+.generation-log li+li{margin-top:3px}
+.generation-log time{flex:none;color:#9aa3b1;font-variant-numeric:tabular-nums}
+.generation-log span{min-width:0;overflow-wrap:anywhere}
+.generate-hint{display:flex;align-items:center;justify-content:center;gap:6px;margin:8px 0 0;font-size:9px;color:#6c7787;line-height:1.5}
+.generate-button:disabled,.generate-button.is-loading{cursor:not-allowed}
+.generate-button.is-loading{opacity:.92}
+.preview-tile.is-generating::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(105deg,transparent 35%,rgba(79,134,232,.13) 50%,transparent 65%);background-size:250% 100%;animation:tile-shimmer 1.8s linear infinite}
+@keyframes tile-shimmer{from{background-position:130% 0}to{background-position:-30% 0}}
+.preview-tile img{animation:tile-reveal .55s ease-out both}
+@keyframes tile-reveal{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:none}}
+@media(max-width:700px){.generation-steps li{font-size:8px}.generation-log{font-size:8.5px}}
+@media(prefers-reduced-motion:reduce){.preview-tile.is-generating::after,.preview-tile img{animation:none}}

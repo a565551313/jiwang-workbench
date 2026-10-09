@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Download, ImagePlus, LoaderCircle, RefreshCw, Sparkles, WandSparkles, X, ArrowRight, Check, Clock3, Coins, Cpu } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
-import { makeDraft, themeGroups, titleForTopic } from '../lib/drafts'
+import { titleForTopic } from '../lib/drafts'
+import { defaultThemePresetGroups, draftForTheme, loadThemePresets, themeNamesFor, type ThemePresetGroup } from '../lib/themePresets'
 import { makeZip, type ZipEntry } from '../lib/archive'
 import { persistReference } from '../lib/repository'
 import { supabase, supabaseConfigured } from '../lib/supabase'
@@ -28,11 +29,13 @@ import type { DraftCell, GenerationJob, GenerationOptions } from '../types'
 
 const router = useRouter()
 const auth = useAuthStore()
-const activeCategory = ref(themeGroups[0].label)
+/** Theme presets published from the admin console; the built-in presets are used until they load. */
+const themeGroupList = ref<ThemePresetGroup[]>(defaultThemePresetGroups())
+const activeCategory = ref(themeGroupList.value[0].label)
 const activeTheme = ref('日常精选')
 const themeDescription = ref('')
 const topic = ref('')
-const draft = ref<DraftCell[]>(makeDraft(activeTheme.value))
+const draft = ref<DraftCell[]>(draftForTheme(themeGroupList.value, activeTheme.value))
 const selectedFile = ref<File | null>(null)
 const referenceUrl = ref('')
 const referenceStoragePath = ref('')
@@ -53,6 +56,19 @@ const progress = ref(0)
 const progressText = ref('准备就绪')
 const failureMessage = ref('')
 const latestJob = ref<GenerationJob | null>(null)
+/** Where the current generation is: drives the step list in the status panel. */
+type GenerationStage = 'idle' | 'upload' | 'create' | 'generate' | 'save' | 'done'
+const generationStage = ref<GenerationStage>('idle')
+const activityLog = ref<Array<{ time: string; text: string }>>([])
+const statusPanel = ref<HTMLElement | null>(null)
+const activityList = ref<HTMLElement | null>(null)
+const generationSteps = [
+  { key: 'upload', label: '上传参考图' },
+  { key: 'create', label: '创建生成任务' },
+  { key: 'generate', label: '模型逐张生成' },
+  { key: 'save', label: '保存素材并结算' },
+] as const
+const stageOrder: Record<GenerationStage, number> = { idle: -1, upload: 0, create: 1, generate: 2, save: 3, done: 4 }
 const features = ref<PublicSiteFeatures>(defaultPublicFeatures)
 const options = reactive<GenerationOptions>({ originalStyle: true, noText: false, whiteBorder: true })
 let referenceUpload: Promise<string | undefined> | null = null
@@ -61,8 +77,8 @@ let balanceLoadSequence = 0
 /** When the preview links on this page were signed; they expire after 30 minutes. */
 let previewSignedAt = 0
 const modelLoadFailed = ref(false)
-const categories = computed(() => themeGroups.map((group) => group.label))
-const visibleThemes = computed(() => themeGroups.find((group) => group.label === activeCategory.value)?.themes ?? [])
+const categories = computed(() => themeGroupList.value.map((group) => group.label))
+const visibleThemes = computed(() => themeNamesFor(themeGroupList.value, activeCategory.value))
 const outputTitle = computed(() => titleForTopic(topic.value || themeDescription.value, activeTheme.value))
 const selectedModel = computed(() => models.value.find((model) => model.id === selectedModelId.value) || null)
 const generationCost = computed(() => selectedModel.value?.priceCoins ?? 0)
@@ -88,10 +104,47 @@ function applyImages(images: Array<{ cellIndex: number; url: string }>) {
   previewSignedAt = Date.now()
 }
 
+/** Append a timestamped line to the process log shown under the status panel. */
+function logActivity(text: string) {
+  const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  activityLog.value = [...activityLog.value, { time, text }].slice(-30)
+}
+
+function stepState(index: number): 'done' | 'active' | 'pending' | 'stopped' {
+  if (generationStage.value === 'done') return 'done'
+  const current = stageOrder[generationStage.value]
+  if (index < current) return 'done'
+  if (index === current) return loading.value ? 'active' : 'stopped'
+  return 'pending'
+}
+
+const generatingLabel = computed(() => (completedCount.value > 0 ? `正在生成 ${completedCount.value}/16 张…` : '正在提交生成任务…'))
+
+let liveSyncedCount = -1
+let liveSyncing = false
+/** Show images as soon as the server has stored them (every batch of 8), instead of waiting for all 16. */
+async function syncDeliveredImages(jobId: string, userId: string, count: number) {
+  if (liveSyncing || count === liveSyncedCount || count === 0) return
+  liveSyncing = true
+  try {
+    applyImages(await loadGenerationImages(jobId, userId))
+    liveSyncedCount = count
+  } catch {
+    // Best effort: the final result is loaded again when the request finishes.
+  } finally {
+    liveSyncing = false
+  }
+}
+
+watch(activityLog, async () => {
+  await nextTick()
+  if (activityList.value) activityList.value.scrollTop = activityList.value.scrollHeight
+})
+
 function selectTheme(theme: string) {
   activeTheme.value = theme
   topic.value = theme
-  draft.value = makeDraft(theme)
+  draft.value = draftForTheme(themeGroupList.value, theme)
   resetResult()
   if (latestJob.value?.status !== 'processing' && latestJob.value?.status !== 'queued') latestJob.value = null
 }
@@ -102,14 +155,14 @@ function useCustomDraft() {
   if (!clean) { ElMessage.warning('先写一句主题需求，再生成主题草案'); return }
   activeTheme.value = '自定义主题'
   topic.value = clean
-  draft.value = makeDraft('日常精选')
+  draft.value = draftForTheme(themeGroupList.value, '日常精选')
   resetResult()
   if (latestJob.value?.status !== 'processing' && latestJob.value?.status !== 'queued') latestJob.value = null
   ElMessage.success('已生成 16 格草案，请检查或编辑每格文字')
 }
 
 function regenerateDraft() {
-  draft.value = makeDraft(activeTheme.value)
+  draft.value = draftForTheme(themeGroupList.value, activeTheme.value)
   resetResult()
 }
 
@@ -124,6 +177,24 @@ function startNewSet() {
 
 async function refreshFeatures() {
   features.value = await loadPublicFeatures()
+}
+
+/** Replace the built-in presets with the published ones. Keeps the current theme when it still exists. */
+async function refreshThemePresets() {
+  const groups = await loadThemePresets()
+  themeGroupList.value = groups
+  if (activeTheme.value === '自定义主题') {
+    if (!groups.some((group) => group.label === activeCategory.value)) activeCategory.value = groups[0].label
+    return
+  }
+  const owner = groups.find((group) => group.themes.some((theme) => theme.name === activeTheme.value))
+  if (owner) {
+    activeCategory.value = owner.label
+    draft.value = draftForTheme(groups, activeTheme.value)
+  } else {
+    activeCategory.value = groups[0].label
+    selectTheme(groups[0].themes[0].name)
+  }
 }
 
 async function refreshModels() {
@@ -177,6 +248,7 @@ function refreshPreviewsIfStale() {
 
 onMounted(() => {
   void refreshFeatures()
+  void refreshThemePresets()
   void refreshModels()
   void refreshBalance()
   void auth.init().catch(() => undefined)
@@ -224,6 +296,8 @@ async function settleSuccess(job: GenerationJob, result: Pick<StickerGenerationR
   const delivered = result.images.length
   const partial = result.status === 'partial' || delivered < 16
   const refunded = partial ? (result.refundedCoins ?? price - Math.ceil((price * delivered) / 16)) : 0
+  generationStage.value = 'done'
+  logActivity(partial ? `已完成：交付 ${delivered}/16 张，退回 ${refunded} 汪币` : `已完成：16 张全部交付，扣除 ${price} 汪币`)
   latestJob.value = {
     ...job,
     status: partial ? 'partial' : 'completed',
@@ -253,11 +327,17 @@ async function generate() {
   if (balanceLoadFailed.value) { ElMessage.warning('汪币余额暂时无法读取，请先重新读取余额，避免提交后无法确认费用'); return }
   if (walletBalance.value < generationCost.value) { ElMessage.warning(`汪币余额不足：本次需要 ${generationCost.value} 汪币，当前余额 ${walletBalance.value}`); return }
   if (draft.value.length !== 16 || draft.value.some((cell) => !cell.caption.trim() || !cell.visual.trim())) { ElMessage.warning('请为 16 格草案都填写短句和画面描述'); return }
+  const userId = auth.user.id
   loading.value = true
   failureMessage.value = ''
   resetResult()
   progress.value = 3
   progressText.value = '正在安全上传参考图并创建生成任务'
+  generationStage.value = 'upload'
+  activityLog.value = []
+  logActivity('已提交生成请求，正在上传参考图')
+  ElMessage({ type: 'success', message: '已开始生成 16 张贴图，通常需要几分钟。请保持本页打开，生成好的图片会陆续显示在预览区。', duration: 6000 })
+  void nextTick(() => statusPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
   const model = selectedModel.value
   const job: GenerationJob = {
     id: crypto.randomUUID(),
@@ -275,6 +355,8 @@ async function generate() {
     const referencePath = referenceStoragePath.value || await (referenceUpload || persistReference(selectedFile.value, auth.user.id))
     if (!referencePath) throw new Error('参考图未能保存到云端。请检查网络、登录状态和私有存储权限，确认上传成功后再开始生成。')
     referenceStoragePath.value = referencePath
+    generationStage.value = 'create'
+    logActivity('参考图已安全保存到私有存储')
     progressText.value = `正在调用 ${model.name} 生成 16 张贴图；失败时系统会尝试退款`
     const result = await generateStickers({
       jobId: job.id,
@@ -286,16 +368,31 @@ async function generate() {
       options: { ...options },
     }, (value, completed) => {
       progress.value = Math.max(progress.value, value)
+      const previous = completedCount.value
       completedCount.value = Math.max(completedCount.value, completed)
-      if (progress.value >= 95) progressText.value = '16 张图片已返回，正在保存素材并完成任务'
-      else if (progress.value >= 10) progressText.value = `模型已返回 ${completedCount.value}/16 张，正在继续生成`
+      if (generationStage.value === 'upload' || generationStage.value === 'create') {
+        generationStage.value = 'generate'
+        logActivity('任务已创建，模型开始逐张生成')
+      }
+      if (completedCount.value > previous) {
+        logActivity(`已生成 ${completedCount.value}/16 张，预览区已更新`)
+        void syncDeliveredImages(job.id, userId, completedCount.value)
+      }
+      if (progress.value >= 95) {
+        progressText.value = '16 张图片已返回，正在保存素材并完成任务'
+        if (generationStage.value === 'generate') { generationStage.value = 'save'; logActivity('16 张图片已全部生成，正在保存并结算') }
+      } else if (progress.value >= 10) progressText.value = `模型已返回 ${completedCount.value}/16 张，正在继续生成`
     })
     if (result.images.length === 0) throw new Error('生成任务已返回，但没有可用图片；请查看任务记录')
+    generationStage.value = 'save'
     applyImages(result.images)
     await settleSuccess(job, result, model.priceCoins)
   } catch (error) {
     const message = error instanceof Error ? error.message : '生成失败，请检查模型配置后重试'
+    logActivity(`生成未完成：${message.split('\n')[0]}`)
     if (isNotStartedError(error)) {
+      generationStage.value = 'idle'
+      activityLog.value = []
       // The server refused before creating a job or reserving coins (maintenance, usage caps, expired photo).
       if (error.code === 'maintenance') features.value = { ...features.value, maintenance: true }
       if (error.code === 'reference_missing') {
@@ -494,7 +591,7 @@ onBeforeUnmount(() => {
         <section class="preview-card">
           <div class="preview-header"><div><div class="preview-eyebrow">PREVIEW CANVAS</div><h2>你的 16 格预览</h2></div><span class="preview-mode"><span></span>云端模型</span></div>
           <div class="preview-title-row"><span class="preview-title">{{ outputTitle }}</span><span class="preview-count">{{ deliveredCount }}/16</span></div>
-          <div v-if="loading || latestJob" class="generation-status" :class="{ 'is-active': loading, 'has-error': Boolean(failureMessage) }" aria-live="polite">
+          <div v-if="loading || latestJob" ref="statusPanel" class="generation-status" :class="{ 'is-active': loading, 'has-error': Boolean(failureMessage) }" aria-live="polite">
             <div class="generation-status-heading">
               <span class="generation-status-icon"><LoaderCircle v-if="loading" class="spin" :size="18" /><Check v-else-if="latestJob?.status === 'completed'" :size="18" /><X v-else-if="latestJob?.status === 'failed'" :size="18" /><Clock3 v-else :size="18" /></span>
               <div class="generation-status-copy"><strong>{{ loading ? '正在生成这套贴图' : latestJob?.status === 'completed' ? '生成完成' : latestJob?.status === 'partial' ? '部分完成' : latestJob?.status === 'failed' ? '生成未完成' : '任务状态待确认' }}</strong><span>{{ progressText }}</span></div>
@@ -502,6 +599,19 @@ onBeforeUnmount(() => {
             </div>
             <el-progress :percentage="progress" :show-text="false" :stroke-width="7" color="#4f86e8" />
             <div class="generation-status-meta"><span>{{ latestJob?.status === 'failed' ? `失败前模型已返回 ${completedCount}/16 张` : latestJob?.status === 'completed' || latestJob?.status === 'partial' ? `已交付 ${deliveredCount}/16 张` : `模型已返回 ${completedCount}/16 张` }}</span><span v-if="loading">进度自动刷新；请保持本页打开</span><span v-else-if="latestJob?.status === 'processing' || latestJob?.status === 'queued'">状态确认期间请勿重复提交</span><span v-else-if="latestJob?.status === 'completed'">图片已保存到私有素材库</span><span v-else-if="latestJob?.status === 'partial'">未交付部分已自动退回，已交付图片可下载</span></div>
+            <ol v-if="generationStage !== 'idle'" class="generation-steps" aria-label="生成步骤">
+              <li v-for="(step, index) in generationSteps" :key="step.key" :class="stepState(index)">
+                <span class="step-dot">
+                  <Check v-if="stepState(index) === 'done'" :size="11" />
+                  <LoaderCircle v-else-if="stepState(index) === 'active'" class="spin" :size="11" />
+                  <X v-else-if="stepState(index) === 'stopped'" :size="11" />
+                </span>
+                <span class="step-label">{{ step.label }}<small v-if="step.key === 'generate' && completedCount > 0 && stepState(index) !== 'pending'">{{ completedCount }}/16</small></span>
+              </li>
+            </ol>
+            <ul v-if="activityLog.length" ref="activityList" class="generation-log" aria-label="生成过程记录">
+              <li v-for="(entry, index) in activityLog" :key="index"><time>{{ entry.time }}</time><span>{{ entry.text }}</span></li>
+            </ul>
             <div v-if="failureMessage" class="generation-error" role="alert">{{ failureMessage }}</div>
           </div>
           <div class="preview-grid" :class="{ 'has-results': deliveredCount === 16 }">
@@ -511,7 +621,8 @@ onBeforeUnmount(() => {
               <span class="tile-number">{{ String(index + 1).padStart(2, '0') }}</span>
             </div>
           </div>
-          <el-button v-if="!hasResult" class="primary-button generate-button" type="primary" :loading="loading" :disabled="features.maintenance || modelsLoading || !selectedModel || !auth.user || balanceLoading || balanceLoadFailed || walletBalance < generationCost || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? '正在生成并结算…' : features.maintenance ? '服务维护中' : modelsLoading ? '正在读取模型…' : modelLoadFailed ? '模型列表暂不可用' : balanceLoading ? '正在读取余额…' : balanceLoadFailed ? '请先重新读取余额' : !auth.user ? '请先登录' : walletBalance < generationCost ? '汪币余额不足' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
+          <el-button v-if="!hasResult" class="primary-button generate-button" type="primary" :loading="loading" :disabled="loading || features.maintenance || modelsLoading || !selectedModel || !auth.user || balanceLoading || balanceLoadFailed || walletBalance < generationCost || latestJob?.status === 'processing' || latestJob?.status === 'queued'" @click="generate"><Sparkles v-if="!loading" :size="17" />{{ loading ? generatingLabel : features.maintenance ? '服务维护中' : modelsLoading ? '正在读取模型…' : modelLoadFailed ? '模型列表暂不可用' : balanceLoading ? '正在读取余额…' : balanceLoadFailed ? '请先重新读取余额' : !auth.user ? '请先登录' : walletBalance < generationCost ? '汪币余额不足' : selectedModel ? `生成 16 张 · ${generationCost} 汪币` : '暂无可用模型' }}<ArrowRight v-if="!loading" :size="16" /></el-button>
+          <p v-if="loading" class="generate-hint" role="status"><LoaderCircle class="spin" :size="12" />生成中，按钮已暂时锁定；请保持本页打开，完成后可直接下载。</p>
           <div v-else class="result-actions"><el-button class="primary-button" type="primary" :loading="zipLoading" @click="downloadZip"><Download :size="16" />下载 {{ deliveredCount }} 张 PNG</el-button><el-button class="text-result-button" @click="router.push('/assets')">打开素材库</el-button><el-button class="text-result-button" @click="startNewSet">生成新的一套</el-button></div>
           <div class="preview-footnote"><span class="tiny-info">i</span><span>模型在服务端调用；图片保存在账号私有素材库。失败时系统会尝试退回已预扣汪币，请以任务历史和余额确认退款状态。</span></div>
         </section>
