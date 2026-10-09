@@ -6,7 +6,8 @@ type SessionPayload = { username: string; expiresAt: number; nonce: string }
 type LoginAttempt = { failures: number; windowStartedAt: number; blockedUntil: number }
 
 const cookieName = 'jiwang_admin_session'
-const sessionSeconds = 12 * 60 * 60
+// 会话有效期 2 小时：泄露的 Cookie 最多被利用 2 小时（过期后需要重新登录）。
+export const sessionSeconds = 2 * 60 * 60
 const rateWindowMs = 15 * 60 * 1000
 const maxFailures = 5
 const attempts = new Map<string, LoginAttempt>()
@@ -87,7 +88,7 @@ function sign(payload: string, secret: string) {
   return createHmac('sha256', secret).update(payload).digest('base64url')
 }
 
-function serializeSession(username: string, secret: string) {
+export function serializeSession(username: string, secret: string) {
   const payload = Buffer.from(JSON.stringify({
     username,
     expiresAt: Date.now() + sessionSeconds * 1000,
@@ -96,7 +97,7 @@ function serializeSession(username: string, secret: string) {
   return `${payload}.${sign(payload, secret)}`
 }
 
-function currentSession(req: IncomingMessage, secret: string) {
+export function currentSession(req: IncomingMessage, secret: string) {
   const token = readCookie(req, cookieName)
   const separator = token.lastIndexOf('.')
   if (separator < 1) return null

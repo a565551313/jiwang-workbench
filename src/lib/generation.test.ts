@@ -1,13 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }))
+const { rpc, invoke } = vi.hoisted(() => ({ rpc: vi.fn(), invoke: vi.fn() }))
 
 vi.mock('./supabase', () => ({
-  supabase: { rpc },
+  supabase: { rpc, functions: { invoke } },
   supabaseConfigured: true,
 }))
 
-import { explainGenerationError, explainPreparationError, loadEnabledImageModels } from './generation'
+import {
+  defaultPublicFeatures,
+  explainGenerationError,
+  explainPreparationError,
+  GenerationHttpError,
+  isNotStartedError,
+  loadEnabledImageModels,
+  loadPublicFeatures,
+  retryGenerationJob,
+} from './generation'
 
 const modelRow = {
   id: '41223bf7-d355-42c4-800f-7b31ae33267b',
@@ -79,5 +88,59 @@ describe('生成失败提示', () => {
     expect(explainPreparationError('汪币余额读取', 'network request failed')).toContain('这一步尚未开始模型调用')
     expect(explainPreparationError('参考图云端保存', 'new row violates row-level security')).toContain('RLS 策略')
     expect(explainPreparationError('参考图云端保存', 'Bucket not found')).toContain('jiwang-private')
+  })
+})
+
+describe('站点功能开关', () => {
+  beforeEach(() => rpc.mockReset())
+
+  it('读取后台开关并映射为前台字段', async () => {
+    rpc.mockResolvedValueOnce({ data: { signup: false, customThemes: true, maintenance: true }, error: null })
+    await expect(loadPublicFeatures()).resolves.toEqual({ signup: false, customThemes: true, maintenance: true })
+    expect(rpc).toHaveBeenCalledWith('public_site_features')
+  })
+
+  it('读取失败时保持默认开放，维护状态以服务端拦截为准', async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: { message: 'boom' } })
+    await expect(loadPublicFeatures()).resolves.toEqual(defaultPublicFeatures)
+  })
+})
+
+describe('生成服务的错误码', () => {
+  beforeEach(() => invoke.mockReset())
+
+  function failedInvoke(status: number, payload: Record<string, unknown>) {
+    invoke.mockResolvedValue({
+      data: null,
+      error: Object.assign(new Error('Edge Function returned a non-2xx status code'), {
+        context: new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } }),
+      }),
+    })
+  }
+
+  it('开始前被拒绝的请求保留错误码，界面可以判断为「未开始、未扣费」', async () => {
+    failedInvoke(429, { error: '今天已达上限，请明天再试。', code: 'quota_daily' })
+    const error = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(GenerationHttpError)
+    expect(error).toMatchObject({ status: 429, code: 'quota_daily', message: '今天已达上限，请明天再试。' })
+    expect(isNotStartedError(error)).toBe(true)
+  })
+
+  it('参考图过期与维护同样属于「未开始」', async () => {
+    failedInvoke(409, { error: '参考图已过期', code: 'reference_missing' })
+    const missing = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(isNotStartedError(missing)).toBe(true)
+
+    failedInvoke(503, { error: '维护中', code: 'maintenance', maintenance: true })
+    const maintenance = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(isNotStartedError(maintenance)).toBe(true)
+  })
+
+  it('普通错误没有错误码，不会被当作未开始', async () => {
+    failedInvoke(502, { error: '上游模型暂时不可用' })
+    const error = await retryGenerationJob('6f1c7b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e').catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(GenerationHttpError)
+    expect(error).toMatchObject({ status: 502, code: '' })
+    expect(isNotStartedError(error)).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Download, Images, LoaderCircle, PackageOpen, RefreshCw, WandSparkles } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
@@ -15,16 +15,35 @@ const assets = ref<WorkAsset[]>([])
 const loading = ref(true)
 const packaging = ref(false)
 const sourceLabel = computed(() => auth.user?.id && supabaseConfigured ? '账号私有素材' : '本机演示素材')
+/** Signed links expire after 30 minutes; remember when this list was signed. */
+let signedAt = 0
+const STALE_AFTER_MS = 20 * 60_000
 
 async function load() {
   loading.value = true
-  try { assets.value = await fetchAssets(auth.user?.id) }
-  finally { loading.value = false }
+  try {
+    assets.value = await fetchAssets(auth.user?.id)
+    signedAt = Date.now()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '素材加载失败')
+  } finally { loading.value = false }
 }
+
+/** A fresh list of signed links; used right before each download. */
+async function freshAssets(): Promise<WorkAsset[]> {
+  if (!auth.user?.id || !supabaseConfigured) return assets.value
+  if (Date.now() - signedAt < STALE_AFTER_MS) return assets.value
+  const fresh = await fetchAssets(auth.user.id)
+  assets.value = fresh
+  signedAt = Date.now()
+  return fresh
+}
+
 async function downloadOne(asset: WorkAsset) {
   try {
-    const response = await fetch(asset.imageUrl)
-    if (!response.ok) throw new Error('素材下载失败')
+    const fresh = (await freshAssets()).find((item) => item.id === asset.id)
+    const response = await fetch(fresh?.imageUrl || asset.imageUrl)
+    if (!response.ok) throw new Error('素材下载失败，链接可能已过期，请刷新页面后重试')
     const blob = await response.blob()
     const extension = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'png'
     const url = URL.createObjectURL(blob)
@@ -35,11 +54,16 @@ async function downloadOne(asset: WorkAsset) {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '素材下载失败') }
 }
+
 async function downloadAll() {
   if (!assets.value.length) return
   packaging.value = true
   try {
-    const blob = await makeZip(assets.value.map((asset) => asset.imageUrl), assets.value.map((asset) => asset.name))
+    const list = await freshAssets()
+    const blob = await makeZip(list.map((asset, index) => ({
+      url: asset.imageUrl,
+      filename: `${String(index + 1).padStart(3, '0')}-${asset.name}`,
+    })))
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
@@ -50,7 +74,16 @@ async function downloadAll() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '打包失败') }
   finally { packaging.value = false }
 }
-onMounted(() => { void load() })
+
+function refreshIfStale() {
+  if (document.visibilityState === 'visible' && Date.now() - signedAt > STALE_AFTER_MS) void load()
+}
+
+onMounted(() => {
+  void load()
+  document.addEventListener('visibilitychange', refreshIfStale)
+})
+onBeforeUnmount(() => document.removeEventListener('visibilitychange', refreshIfStale))
 watch(() => auth.user?.id, () => { void load() })
 </script>
 

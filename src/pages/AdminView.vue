@@ -7,7 +7,7 @@ import {
   Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound, Plus, Pencil, Trash2,
 } from '@lucide/vue'
 import AuthDialog from '../components/AuthDialog.vue'
-import { adjustAdminWallet, defaultAdminSettings, fetchUpstreamImageModels, getProviderSaveIssues, loadAdminWorkspace, requeueAdminJob, saveAdminProviderApiKey, saveAdminSettings, type AdminImageProvider, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
+import { adjustAdminWallet, baseUrlChanged, defaultAdminSettings, fetchUpstreamImageModels, getProviderSaveIssues, loadAdminWorkspace, saveAdminProviderApiKey, saveAdminSettings, type AdminImageProvider, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
 
@@ -36,10 +36,14 @@ const sections = [
 ]
 const workspace = ref<Awaited<ReturnType<typeof loadAdminWorkspace>> | null>(null)
 const settings = ref<AdminSettings>(JSON.parse(JSON.stringify(defaultAdminSettings)) as AdminSettings)
-const providerSaveIssues = computed(() => providerDraft.value ? getProviderSaveIssues(providerDraft.value, providerApiKey.value) : [])
-const themeText = computed({
-  get: () => settings.value.themes.presets.join('\n'),
-  set: (value: string) => { settings.value.themes.presets = value.split('\n').map((item) => item.trim()).filter(Boolean) },
+/** The provider as currently saved on the server; used to detect a Base URL change that needs a new key. */
+function savedProvider(id: string): AdminImageProvider | undefined {
+  return settings.value.model.providers.find((item) => item.id === id)
+}
+const providerSaveIssues = computed(() => {
+  const draft = providerDraft.value
+  if (!draft) return []
+  return getProviderSaveIssues(draft, providerApiKey.value, savedProvider(draft.id)?.baseUrl)
 })
 const isAdmin = computed(() => !supabaseConfigured || auth.user?.app_metadata?.role === 'admin')
 const title = computed(() => sections.find((item) => item.id === activeSection.value)?.label || '运营总览')
@@ -52,7 +56,7 @@ const failureRate = computed(() => {
 
 function money(value: number) { return new Intl.NumberFormat('zh-CN').format(value) }
 function dateLabel(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) }
-function statusLabel(status: AdminJob['status']) { return status === 'completed' ? '已完成' : status === 'failed' ? '失败' : status === 'processing' ? '生成中' : '排队中' }
+function statusLabel(status: AdminJob['status']) { return status === 'completed' ? '已完成' : status === 'partial' ? '部分完成' : status === 'failed' ? '失败' : status === 'processing' ? '生成中' : '排队中' }
 
 async function refresh() {
   if (!auth.ready) return
@@ -154,6 +158,11 @@ async function fetchModels() {
     ElMessage.warning('首次获取模型列表前，请输入 API Key')
     return
   }
+  const saved = savedProvider(provider.id)
+  if (!providerApiKey.value.trim() && saved && baseUrlChanged(provider.baseUrl, saved.baseUrl)) {
+    ElMessage.warning('修改 Base URL 后必须重新输入 API Key，才能从新地址获取模型')
+    return
+  }
   fetchingModels.value = true
   try {
     const modelIds = await fetchUpstreamImageModels({
@@ -178,7 +187,7 @@ async function saveProvider() {
     ElMessage.warning('模型数据升级尚未完成，当前配置为只读')
     return
   }
-  const issues = getProviderSaveIssues(provider, providerApiKey.value)
+  const issues = getProviderSaveIssues(provider, providerApiKey.value, savedProvider(provider.id)?.baseUrl)
   if (issues.length) {
     ElMessage.warning(issues[0])
     return
@@ -208,21 +217,6 @@ async function saveProvider() {
   } catch (cause) {
     ElMessage.error(cause instanceof Error ? cause.message : '供应商配置保存失败')
   } finally { saving.value = false }
-}
-
-async function retryJob(job: AdminJob) {
-  try {
-    await ElMessageBox.confirm(
-      '系统会使用该任务对应的模型重新生成，并按当前模型价格预扣汪币；成功后结算，失败时会尝试退款，请在任务记录和用户余额中确认退款状态。',
-      `重新排队：${job.title}`,
-      { confirmButtonText: '确认重排', cancelButtonText: '取消', type: 'warning' },
-    )
-    await requeueAdminJob(job.jobId, workspace.value?.demo ?? true)
-    ElMessage.success('任务已重新排队')
-    await refresh()
-  } catch (cause) {
-    if (cause !== 'cancel' && cause !== 'close') ElMessage.error(cause instanceof Error ? cause.message : '任务更新失败')
-  }
 }
 
 function openWalletDialog(user: AdminUser) {
@@ -335,16 +329,15 @@ async function resetSettings() {
         </section>
 
         <section v-else-if="activeSection === 'tasks'" class="admin-section">
-          <div class="admin-section-title"><div><h2>任务运维</h2><p>查看生成模型和费用；失败任务可按当前模型价格重试。</p></div><div class="admin-search"><Search :size="15" /><el-input v-model="searchText" placeholder="搜索任务 / 用户 / 模型" clearable /></div></div>
+          <div class="admin-section-title"><div><h2>任务运维</h2><p>查看生成模型、费用与实际交付进度；失败任务由用户本人在“生成记录”中确认价格后重新生成。</p></div><div class="admin-search"><Search :size="15" /><el-input v-model="searchText" placeholder="搜索任务 / 用户 / 模型" clearable /></div></div>
           <div class="admin-table-wrap"><el-table :data="jobRows" stripe style="width: 100%" empty-text="没有匹配的生成任务">
-            <el-table-column label="任务" min-width="230"><template #default="{ row }"><div class="table-primary">{{ row.title }}</div><div class="table-secondary">{{ row.topic || '自定义主题' }} · {{ row.assetCount || 0 }} 格 · {{ row.modelName || '—' }} · {{ row.priceCoins || 0 }} 汪币</div></template></el-table-column>
+            <el-table-column label="任务" min-width="230"><template #default="{ row }"><div class="table-primary">{{ row.title }}</div><div class="table-secondary">{{ row.topic || '自定义主题' }} · 已交付 {{ row.deliveredCount || 0 }}/16 张 · 第 {{ row.attempt || 1 }} 次尝试 · {{ row.modelName || '—' }} · {{ row.priceCoins || 0 }} 汪币</div></template></el-table-column>
             <el-table-column prop="userEmail" label="用户" min-width="165" show-overflow-tooltip />
             <el-table-column label="状态" width="115"><template #default="{ row }"><span class="admin-status" :class="row.status"><i></i>{{ statusLabel(row.status) }}</span></template></el-table-column>
             <el-table-column label="失败诊断" min-width="320" show-overflow-tooltip><template #default="{ row }"><span v-if="row.status === 'failed'">{{ row.errorMessage || '该任务未保存失败详情；请检查是否为旧任务，并先核对用户退款状态。' }}</span><span v-else class="table-muted">—</span></template></el-table-column>
             <el-table-column label="创建时间" width="145"><template #default="{ row }">{{ dateLabel(row.createdAt) }}</template></el-table-column>
-            <el-table-column label="操作" width="125" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'failed'" class="table-action" link type="primary" @click="retryJob(row as AdminJob)"><RefreshCw :size="13" />重新生成</el-button><span v-else class="table-muted">—</span></template></el-table-column>
           </el-table></div>
-          <p class="admin-table-note"><Clock3 :size="13" /> 重试会通过服务端重新调用模型，并按当前模型价格扣费；失败时系统会尝试退款，请根据用户余额和账本记录确认是否到账。</p>
+          <p class="admin-table-note"><Clock3 :size="13" /> 管理员不能代用户重新生成。部分交付的任务按实际张数结算，未交付部分已自动退回；超时未完成的任务由服务端自动结算。</p>
         </section>
 
         <section v-else-if="activeSection === 'users'" class="admin-section">
@@ -361,12 +354,8 @@ async function resetSettings() {
         </section>
 
         <section v-else-if="activeSection === 'content'" class="admin-section">
-          <div class="admin-section-title"><div><h2>内容配置</h2><p>管理创作主题和默认提示词，影响后续用户端体验。</p></div></div>
+          <div class="admin-section-title"><div><h2>内容配置</h2><p>管理默认提示词模板，影响后续生成任务。主题目前由创作工坊内置提供。</p></div></div>
           <div class="admin-config-grid">
-            <article class="admin-panel config-card"><div class="config-card-title"><span class="config-icon blue"><Palette :size="17" /></span><div><h3>主题预设</h3><p>在创作工作台展示的主题入口</p></div></div>
-              <label class="admin-field-label" for="theme-presets">主题名称（每行一个）</label><el-input id="theme-presets" v-model="themeText" type="textarea" :rows="7" placeholder="每行输入一个主题" />
-              <div class="field-footnote">共 {{ settings.themes.presets.length }} 个主题预设</div>
-            </article>
             <article class="admin-panel config-card"><div class="config-card-title"><span class="config-icon violet"><FileText :size="17" /></span><div><h3>系统提示词模板</h3><p v-pre>支持 {{topic}}、{{caption}} 和 {{visual}} 变量</p></div></div>
               <label class="admin-field-label" for="sticker-prompt">表情生成提示词</label><el-input id="sticker-prompt" v-model="settings.prompts.sticker" type="textarea" :rows="9" placeholder="输入生成提示词模板" />
               <div class="field-footnote">请保留需要由任务服务填入的变量标记</div>
@@ -396,10 +385,10 @@ async function resetSettings() {
           <div v-if="settings.model.providers.length === 0" class="admin-panel-empty">还没有供应商或模型配置，点击“添加模型”开始添加。</div>
           <div class="secret-note"><ShieldCheck :size="15" /><span>供应商 API Key 加密保存在 Supabase Vault，由生成 Edge Function 安全读取；不会返回浏览器或写入 localStorage。只有 API Key 已保存、价格有效并启用的模型才会显示在前台。</span></div>
           <article class="admin-panel feature-panel"><div class="admin-panel-head"><div><h3>产品功能开关</h3><p>控制产品模块的开放状态</p></div><span class="feature-icon"><ToggleLeft :size="16" /></span></div>
-            <div class="feature-row"><div><b>邮箱注册</b><small>允许新用户创建极汪账号</small></div><el-switch v-model="settings.features.signup" /></div>
-            <div class="feature-row"><div><b>自定义主题</b><small>允许用户输入自定义创作主题</small></div><el-switch v-model="settings.features.customThemes" /></div>
-            <div class="feature-row"><div><b>社区投稿入口</b><small>预留投稿审核功能，当前未开放</small></div><el-switch v-model="settings.features.communitySubmissions" /></div>
-            <div class="feature-row"><div><b>维护模式</b><small>启用后应由服务端拦截用户侧新任务</small></div><el-switch v-model="settings.features.maintenance" /></div>
+            <div class="feature-row"><div><b>邮箱注册</b><small>关闭后前台隐藏注册入口；真正禁止注册还需在 Supabase Auth 中关闭</small></div><el-switch v-model="settings.features.signup" /></div>
+            <div class="feature-row"><div><b>自定义主题</b><small>关闭后创作工坊隐藏自定义主题输入</small></div><el-switch v-model="settings.features.customThemes" /></div>
+            <div class="feature-row"><div><b>社区投稿入口</b><small>预留投稿审核功能，当前无前台入口</small></div><el-switch v-model="settings.features.communitySubmissions" /></div>
+            <div class="feature-row"><div><b>维护模式</b><small>开启后服务端拒绝新建生成任务（已在进行中的任务不受影响）</small></div><el-switch v-model="settings.features.maintenance" /></div>
           </article>
           <div class="admin-save-row"><span>模型配置与功能开关保存到后台；启用模型需已配置 API Key 并设置有效汪币价格。</span><div class="admin-save-actions"><el-button class="admin-quiet" @click="resetSettings"><RefreshCw :size="14" />恢复默认</el-button><el-button class="admin-primary" type="primary" :loading="saving" @click="saveSettings"><Save :size="15" />保存系统设置</el-button></div></div>
         </section>

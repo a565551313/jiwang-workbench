@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getProviderSaveIssues, type AdminImageProvider } from './admin'
+import { baseUrlChanged, getProviderSaveIssues, type AdminImageProvider } from './admin'
 
 function provider(overrides: Partial<AdminImageProvider> = {}): AdminImageProvider {
   return {
@@ -47,5 +47,18 @@ describe('供应商模型保存校验', () => {
     })
     expect(getProviderSaveIssues(invalid, '')).toContain('请填写有效的 HTTPS Base URL。')
     expect(getProviderSaveIssues(invalid, '')).toContain('同一供应商下的模型 ID 不能重复。')
+  })
+
+  it('修改已保存密钥的供应商 Base URL 时必须重新输入 API Key', () => {
+    const changed = provider({ baseUrl: 'https://evil.example.net/v1' })
+    const issues = getProviderSaveIssues(changed, '', 'https://api.example.com/v1')
+    expect(issues.join('\n')).toContain('修改 Base URL 后必须重新输入 API Key')
+    expect(getProviderSaveIssues(changed, '12345678', 'https://api.example.com/v1')).toEqual([])
+  })
+
+  it('只改末尾斜杠不算修改地址；未保存密钥的新供应商也无需检查', () => {
+    expect(baseUrlChanged('https://api.example.com/v1/', 'https://api.example.com/v1')).toBe(false)
+    expect(getProviderSaveIssues(provider({ baseUrl: 'https://api.example.com/v1/' }), '', 'https://api.example.com/v1')).toEqual([])
+    expect(getProviderSaveIssues(provider({ secretConfigured: false, baseUrl: 'https://new.example.com/v1' }), '12345678', undefined)).toEqual([])
   })
 })

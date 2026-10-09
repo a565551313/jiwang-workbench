@@ -20,7 +20,9 @@ export interface AdminJob {
   priceCoins?: number
   createdAt: string
   finishedAt?: string
-  assetCount: number
+  /** Images actually delivered (0–16). */
+  deliveredCount: number
+  attempt: number
   errorMessage?: string
 }
 
@@ -51,13 +53,25 @@ export interface AdminImageProvider {
   models: AdminImageModel[]
 }
 
-export function getProviderSaveIssues(provider: AdminImageProvider, apiKey: string): string[] {
+/** True when the Base URL differs from the saved one (trailing slashes ignored, as on the server). */
+export function baseUrlChanged(current: string, saved: string): boolean {
+  return current.trim().replace(/\/+$/, '') !== saved.trim().replace(/\/+$/, '')
+}
+
+/**
+ * `originalBaseUrl` is the value stored on the server. Changing the Base URL of a provider whose key is saved
+ * requires typing the key again; otherwise the server (correctly) refuses to use the old key.
+ */
+export function getProviderSaveIssues(provider: AdminImageProvider, apiKey: string, originalBaseUrl?: string): string[] {
   const issues: string[] = []
   const trimmedKey = apiKey.trim()
   const modelIds = provider.models.map((model) => model.name.trim())
 
   if (!provider.name.trim()) issues.push('请填写供应商名称。')
   if (!provider.baseUrl.trim().startsWith('https://')) issues.push('请填写有效的 HTTPS Base URL。')
+  if (originalBaseUrl !== undefined && provider.secretConfigured && !trimmedKey && baseUrlChanged(provider.baseUrl, originalBaseUrl)) {
+    issues.push('修改 Base URL 后必须重新输入 API Key；旧密钥只会发送到保存时的地址，不会用于新地址。')
+  }
   if (modelIds.some((name) => !name)) issues.push('请填写每个模型 ID。')
   if (new Set(modelIds).size !== modelIds.length) issues.push('同一供应商下的模型 ID 不能重复。')
   if (trimmedKey && (trimmedKey.length < 8 || apiKey.length > 8192)) issues.push('API Key 长度无效。')
@@ -78,7 +92,6 @@ export function getProviderSaveIssues(provider: AdminImageProvider, apiKey: stri
 }
 
 export interface AdminSettings {
-  themes: { presets: string[] }
   prompts: { sticker: string }
   model: { providers: AdminImageProvider[] }
   features: { signup: boolean; customThemes: boolean; communitySubmissions: boolean; maintenance: boolean }
@@ -94,7 +107,6 @@ export interface AdminWorkspace {
 }
 
 export const defaultAdminSettings: AdminSettings = {
-  themes: { presets: ['日常聊天', '可爱撒娇', '上班摸鱼', '节日限定', '自定义主题'] },
   prompts: { sticker: '生成一套统一角色设定的聊天表情。每格保持清晰轮廓、单一动作和易读情绪；透明背景，主体居中。主题：{{topic}}；单格描述：{{caption}}；画面：{{visual}}。' },
   model: { providers: [] },
   features: { signup: true, customThemes: true, communitySubmissions: false, maintenance: false },
@@ -124,19 +136,20 @@ function sampleJobs(): AdminJob[] {
     status: job.status,
     createdAt: job.createdAt,
     finishedAt: job.finishedAt,
-    assetCount: job.assetCount ?? 16,
+    deliveredCount: job.completedCount ?? 0,
+    attempt: job.attempt ?? 1,
     errorMessage: job.errorMessage,
   }))
   const now = Date.now()
-  const seeded: GenerationJob[] = [
-    { id: 'demo-job-1003', title: '周一不想上班', topic: '上班摸鱼', status: 'completed', createdAt: new Date(now - 18 * 60_000).toISOString(), finishedAt: new Date(now - 16 * 60_000).toISOString(), assetCount: 16 },
-    { id: 'demo-job-1002', title: '今天也要开心', topic: '日常聊天', status: 'processing', createdAt: new Date(now - 7 * 60_000).toISOString(), assetCount: 0 },
-    { id: 'demo-job-1001', title: '节日快乐小狗', topic: '节日限定', status: 'failed', createdAt: new Date(now - 90 * 60_000).toISOString(), finishedAt: new Date(now - 89 * 60_000).toISOString(), assetCount: 0 },
+  const seeded: Array<GenerationJob & { completedCount: number }> = [
+    { id: 'demo-job-1003', title: '周一不想上班', topic: '上班摸鱼', status: 'completed', createdAt: new Date(now - 18 * 60_000).toISOString(), finishedAt: new Date(now - 16 * 60_000).toISOString(), completedCount: 16 },
+    { id: 'demo-job-1002', title: '今天也要开心', topic: '日常聊天', status: 'processing', createdAt: new Date(now - 7 * 60_000).toISOString(), completedCount: 0 },
+    { id: 'demo-job-1001', title: '节日快乐小狗', topic: '节日限定', status: 'failed', createdAt: new Date(now - 90 * 60_000).toISOString(), finishedAt: new Date(now - 89 * 60_000).toISOString(), completedCount: 0 },
   ]
-  const existing = readLocal<GenerationJob[]>(DEMO_JOBS_KEY, [])
+  const existing = readLocal<Array<GenerationJob & { completedCount: number }>>(DEMO_JOBS_KEY, [])
   const jobs = existing.length ? existing : seeded
   if (!existing.length) localStorage.setItem(DEMO_JOBS_KEY, JSON.stringify(seeded))
-  return jobs.map((job) => ({ jobId: job.id, userEmail: 'demo@jiwang.local', title: job.title, topic: job.topic, status: job.status, createdAt: job.createdAt, finishedAt: job.finishedAt, assetCount: job.assetCount ?? 16 }))
+  return jobs.map((job) => ({ jobId: job.id, userEmail: 'demo@jiwang.local', title: job.title, topic: job.topic, status: job.status, createdAt: job.createdAt, finishedAt: job.finishedAt, deliveredCount: job.completedCount ?? 0, attempt: 1 }))
 }
 
 function sampleUsers(): AdminUser[] {
@@ -187,7 +200,6 @@ function normalizeSettings(rows: Array<{ setting_key: string; value: unknown }>)
       })
       : []
   return {
-    themes: { ...defaultAdminSettings.themes, ...(values.themes || {}) },
     prompts: { ...defaultAdminSettings.prompts, ...(values.prompts || {}) },
     model: { providers: providerList },
     features: { ...defaultAdminSettings.features, ...(values.features || {}) },
@@ -229,11 +241,7 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
 
   const metricsRaw = (metricsResult.data || {}) as Record<string, number>
   const users = (usersResult.data || []) as Array<{ user_id: string; email: string | null; display_name: string | null; created_at: string; coins: number; total_count: number }>
-  const jobs = (jobsResult.data || []) as Array<{ job_id: string; user_email: string | null; title: string; topic: string; status: GenerationJob['status']; created_at: string; finished_at: string | null; asset_count: number | null; model_name?: string | null; price_coins?: number | null }>
-  const jobErrorsResult = jobs.length
-    ? await supabase.from('generation_jobs').select('id,error_message').in('id', jobs.map((job) => job.job_id))
-    : { data: [], error: null }
-  const jobErrors = new Map(((jobErrorsResult.data || []) as Array<{ id: string; error_message: string | null }>).map((row) => [row.id, row.error_message || undefined]))
+  const jobs = (jobsResult.data || []) as Array<{ job_id: string; user_email: string | null; title: string; topic: string; status: GenerationJob['status']; created_at: string; finished_at: string | null; completed_count: number; attempt: number; model_name: string | null; price_coins: number | null; error_message: string | null }>
   const settingsRows = (settingsResult.data || []) as Array<{ setting_key: string; value: unknown }>
   const modelValue = settingsRows.find((row) => row.setting_key === 'model')?.value
   const providerModelSchemaReady = Boolean(modelValue && typeof modelValue === 'object' && Array.isArray((modelValue as Record<string, unknown>).providers))
@@ -248,7 +256,20 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
       coinsInCirculation: Number(metricsRaw.coins_in_circulation || 0),
     },
     users: users.map((user) => ({ userId: user.user_id, email: user.email || '—', displayName: user.display_name || '极汪用户', createdAt: user.created_at, coins: Number(user.coins || 0), totalCount: Number(user.total_count || 0) })),
-    jobs: jobs.map((job) => ({ jobId: job.job_id, userEmail: job.user_email || '—', title: job.title, topic: job.topic, status: job.status, modelName: job.model_name || undefined, priceCoins: job.price_coins ?? undefined, createdAt: job.created_at, finishedAt: job.finished_at || undefined, assetCount: Number(job.asset_count || 0), errorMessage: jobErrors.get(job.job_id) })),
+    jobs: jobs.map((job) => ({
+      jobId: job.job_id,
+      userEmail: job.user_email || '—',
+      title: job.title,
+      topic: job.topic,
+      status: job.status,
+      modelName: job.model_name || undefined,
+      priceCoins: job.price_coins ?? undefined,
+      createdAt: job.created_at,
+      finishedAt: job.finished_at || undefined,
+      deliveredCount: Number(job.completed_count || 0),
+      attempt: Number(job.attempt || 1),
+      errorMessage: job.error_message || undefined,
+    })),
     settings: normalizeSettings(settingsRows),
     providerModelSchemaReady,
   }
@@ -295,40 +316,6 @@ export async function fetchUpstreamImageModels(input: {
   const models = data && typeof data === 'object' ? (data as { models?: unknown }).models : null
   if (!Array.isArray(models)) throw new Error('上游返回的模型列表格式无效')
   return models.filter((item): item is string => typeof item === 'string' && item.length > 0)
-}
-
-export async function requeueAdminJob(jobId: string, demo: boolean) {
-  if (demo || !supabase) {
-    const jobs = readLocal<GenerationJob[]>(JOBS_KEY, [])
-    const target = jobs.find((job) => job.id === jobId)
-    if (target) {
-      target.status = 'queued'
-      target.finishedAt = undefined
-      localStorage.setItem(JOBS_KEY, JSON.stringify(jobs))
-      return
-    }
-    const demoJobs = readLocal<GenerationJob[]>(DEMO_JOBS_KEY, [])
-    const demoTarget = demoJobs.find((job) => job.id === jobId)
-    if (demoTarget) {
-      demoTarget.status = 'queued'
-      demoTarget.finishedAt = undefined
-      localStorage.setItem(DEMO_JOBS_KEY, JSON.stringify(demoJobs))
-    }
-    return
-  }
-  const { error } = await supabase.functions.invoke('jiwang-generate', { body: { action: 'retry', jobId } })
-  if (error) {
-    let message = error.message
-    const context = (error as { context?: unknown }).context
-    if (context instanceof Response) {
-      try {
-        const body = await context.clone().json() as { error?: unknown; message?: unknown }
-        if (typeof body.error === 'string') message = body.error
-        else if (typeof body.message === 'string') message = body.message
-      } catch { /* Retain the SDK message when the response is not JSON. */ }
-    }
-    throw new Error(message || '任务重试失败，请检查任务记录、模型配置和退款状态')
-  }
 }
 
 export async function adjustAdminWallet(userId: string, delta: number, note: string, demo: boolean) {
