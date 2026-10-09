@@ -7,6 +7,8 @@ import {
   Save, Search, Server, ShieldCheck, Sparkles, ToggleLeft, UsersRound, Plus, Pencil, Trash2,
 } from '@lucide/vue'
 import AuthDialog from '../components/AuthDialog.vue'
+import ThemePresetEditor from '../components/ThemePresetEditor.vue'
+import { themePresetIssues } from '../lib/themePresets'
 import { adjustAdminWallet, baseUrlChanged, defaultAdminSettings, fetchUpstreamImageModels, getProviderSaveIssues, loadAdminWorkspace, saveAdminProviderApiKey, saveAdminSettings, type AdminImageProvider, type AdminJob, type AdminSettings, type AdminUser } from '../lib/admin'
 import { supabaseConfigured } from '../lib/supabase'
 import { useAuthStore } from '../stores/auth'
@@ -93,6 +95,11 @@ async function saveSettings() {
   )))
   if (invalidEnabledModel) {
     ElMessage.warning('已启用模型必须填写供应商、模型 ID、HTTPS Base URL、已保存密钥及 1–100000 的整数汪币价格')
+    return
+  }
+  const themeIssues = themePresetIssues(settings.value.themePresets)
+  if (themeIssues.length) {
+    ElMessage.warning(`主题预设尚未保存：${themeIssues[0]}`)
     return
   }
   saving.value = true
@@ -354,13 +361,17 @@ async function resetSettings() {
         </section>
 
         <section v-else-if="activeSection === 'content'" class="admin-section">
-          <div class="admin-section-title"><div><h2>内容配置</h2><p>管理默认提示词模板，影响后续生成任务。主题目前由创作工坊内置提供。</p></div></div>
+          <div class="admin-section-title"><div><h2>内容配置</h2><p>管理默认提示词模板和创作工坊的主题预设。保存后，前台主题列表与新建草案会使用新内容。</p></div></div>
           <div class="admin-config-grid">
             <article class="admin-panel config-card"><div class="config-card-title"><span class="config-icon violet"><FileText :size="17" /></span><div><h3>系统提示词模板</h3><p v-pre>支持 {{topic}}、{{caption}} 和 {{visual}} 变量</p></div></div>
               <label class="admin-field-label" for="sticker-prompt">表情生成提示词</label><el-input id="sticker-prompt" v-model="settings.prompts.sticker" type="textarea" :rows="9" placeholder="输入生成提示词模板" />
               <div class="field-footnote">请保留需要由任务服务填入的变量标记</div>
             </article>
           </div>
+          <article class="admin-panel theme-config-panel">
+            <div class="config-card-title"><span class="config-icon cyan"><Palette :size="17" /></span><div><h3>创作工坊主题预设</h3><p>每个主题是一套 16 格草案（短句 + 画面描述）。分类与主题名称全站唯一；保存后前台即时生效。</p></div></div>
+            <ThemePresetEditor v-model="settings.themePresets" />
+          </article>
           <div class="admin-save-row"><span>调整会作为管理设置保存，不包含密钥。</span><el-button class="admin-primary" type="primary" :loading="saving" @click="saveSettings"><Save :size="15" />保存内容配置</el-button></div>
         </section>
 
@@ -385,7 +396,7 @@ async function resetSettings() {
           <div v-if="settings.model.providers.length === 0" class="admin-panel-empty">还没有供应商或模型配置，点击“添加模型”开始添加。</div>
           <div class="secret-note"><ShieldCheck :size="15" /><span>供应商 API Key 加密保存在 Supabase Vault，由生成 Edge Function 安全读取；不会返回浏览器或写入 localStorage。只有 API Key 已保存、价格有效并启用的模型才会显示在前台。</span></div>
           <article class="admin-panel feature-panel"><div class="admin-panel-head"><div><h3>产品功能开关</h3><p>控制产品模块的开放状态</p></div><span class="feature-icon"><ToggleLeft :size="16" /></span></div>
-            <div class="feature-row"><div><b>邮箱注册</b><small>关闭后前台隐藏注册入口；真正禁止注册还需在 Supabase Auth 中关闭</small></div><el-switch v-model="settings.features.signup" /></div>
+            <div class="feature-row"><div><b>邮箱注册</b><small>关闭后前台隐藏注册入口，数据库同时拒绝新账号注册（包括直接调用接口）；已有账号不受影响</small></div><el-switch v-model="settings.features.signup" /></div>
             <div class="feature-row"><div><b>自定义主题</b><small>关闭后创作工坊隐藏自定义主题输入</small></div><el-switch v-model="settings.features.customThemes" /></div>
             <div class="feature-row"><div><b>社区投稿入口</b><small>预留投稿审核功能，当前无前台入口</small></div><el-switch v-model="settings.features.communitySubmissions" /></div>
             <div class="feature-row"><div><b>维护模式</b><small>开启后服务端拒绝新建生成任务（已在进行中的任务不受影响）</small></div><el-switch v-model="settings.features.maintenance" /></div>

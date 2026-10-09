@@ -81,12 +81,18 @@ npm run build
 4. [`supabase/migrations/20261008103000_provider_model_settings.sql`](supabase/migrations/20261008103000_provider_model_settings.sql)
 5. [`supabase/migrations/20261008120000_generation_recovery.sql`](supabase/migrations/20261008120000_generation_recovery.sql)
 6. [`supabase/migrations/20261008130000_retention_and_quotas.sql`](supabase/migrations/20261008130000_retention_and_quotas.sql)
+7. [`supabase/migrations/20261009100000_theme_presets.sql`](supabase/migrations/20261009100000_theme_presets.sql)
+8. [`supabase/migrations/20261009110000_enforce_signup_switch.sql`](supabase/migrations/20261009110000_enforce_signup_switch.sql)
 
 第 3 个迁移会将旧模型配置和 Vault 密钥迁移为模型列表；原模型保留停用状态、价格设为 0，因此不会自动出现在前台或触发扣费。第 4 个迁移把供应商级别的协议、Base URL 与密钥写入新结构。第 5 个迁移加入按尝试记账、部分交付结算、超时回收、密钥与 Base URL 绑定、素材表权限收紧，以及前台功能开关的只读接口。第 6 个迁移加入同时进行中上限、每日开始次数上限、参考图保留期限，以及定时清理所需的数据库函数。
 
 **升级注意**：第 5 个迁移会为升级前已保存密钥的供应商记录“当前”的 Base URL。如果升级前曾改过某个供应商的地址，请在后台重新保存该供应商的 API Key。
 
 **升级注意（第 6 个迁移）**：升级后，已经超过保留期限的旧参考图会在下一次清理时删除（未用于生成且上传超过 7 天，或最后一次使用（包括重新生成）已超过 30 天）。如需保留，请在升级前自行下载。
+
+**邮箱注册开关（第 8 个迁移）**：升级后，后台“产品功能开关”中的“邮箱注册”会由数据库真正执行。若升级前该开关为关闭状态，升级后新用户也无法注册。缺省（未设置）视为开启。
+
+**主题预设（第 7 个迁移）**：只新增匿名可读的只读函数 `public_theme_presets()`，不改动现有数据。升级后在 `/admin` 的“内容配置”保存一次主题预设即可由后台接管；保存前前台沿用内置预设。
 
 **定时回收（可选）**：第 5 个迁移会尝试启用 pg_cron，每 5 分钟调用一次 `worker_reap_stale_generations()`。若项目不支持 pg_cron，迁移只会输出提示；超时任务仍会在下一次生成请求时被回收。
 
@@ -133,7 +139,8 @@ supabase functions deploy jiwang-generate --project-ref <project-ref>
 - 管理员登录的失败限流保存在单个服务实例内存中；多实例或冷启动后会失效。需要强约束时，应改用共享存储（如 Redis 或数据库）。
 - 管理员会话为无状态签名 Cookie，登出只清除 Cookie；泄露的会话在 2 小时内仍有效。管理员账号只提供给少数可信人员，密码应足够长且随机（例如 `openssl rand -base64 24` 生成）；这是已接受的风险。
 - Edge Function 的地址检查只基于主机名字符串，不做 DNS 解析；DNS 重绑定等网络层风险需要在出口网络侧控制。
-- “邮箱注册”开关只隐藏前台入口；真正禁止注册还需在 Supabase Auth 中关闭。
+- “邮箱注册”开关由数据库触发器强制执行：关闭时任何途径都无法新建账号，包括 Supabase 控制台的“Add user / Invite”。需要临时添加账号时，请先在后台开启注册，再关闭。
+- 注册被拒绝时，Supabase 可能返回通用的数据库错误文字，而不是“当前暂未开放注册”。前台在提交前已会检查开关，这种情况只会出现在开关刚被关闭的瞬间。
 - 参考图清理依赖定时调用：未完成“参考图定时清理”的一次性设置时，过期照片只在有人生成时顺带清理一小批。
 - 同时进行中的数量按任务状态计算；卡住的任务要等超时回收（10 分钟）后才释放名额。每日次数与名额由数据库计数，但仍是产品层面的软上限，成本上限同时受汪币余额约束。
-- 主题预设目前由创作工坊内置，后台暂不提供编辑。
+- 主题预设保存在后台（`admin_settings` 的 `themePresets`）。尚未在后台保存过时，前台使用 `src/lib/drafts.ts` 中的内置预设。

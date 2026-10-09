@@ -28,6 +28,7 @@ function humanizeAuthError(error: unknown) {
   const message = error instanceof Error ? error.message : ''
   if (/invalid login credentials/i.test(message)) return '邮箱或密码不匹配，请检查登录信息后重试。'
   if (/email not confirmed/i.test(message)) return '该邮箱尚未完成验证，请先查收并点击验证邮件。'
+  if (/暂未开放注册/.test(message)) return '当前暂未开放注册，请使用已有账号登录。'
   return message || '登录失败，请稍后重试。'
 }
 
