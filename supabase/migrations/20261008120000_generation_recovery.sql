@@ -11,7 +11,12 @@
 alter table public.generation_jobs
   add column if not exists attempt integer not null default 1 check (attempt >= 1),
   add column if not exists completed_count integer not null default 0 check (completed_count between 0 and 16),
-  add column if not exists queued_at timestamptz not null default now();
+  add column if not exists queued_at timestamptz;
+
+-- Existing jobs have no retry timestamp yet; preserve their original age instead of resetting retention at migration time.
+update public.generation_jobs set queued_at = created_at where queued_at is null;
+alter table public.generation_jobs alter column queued_at set default now();
+alter table public.generation_jobs alter column queued_at set not null;
 
 alter table public.generation_jobs drop constraint if exists generation_jobs_status_check;
 alter table public.generation_jobs

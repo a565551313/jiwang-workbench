@@ -723,6 +723,10 @@ function jobResponse(jobId: string, outcome: JobOutcome) {
 async function handleRetry(admin: SupabaseClient, user: { id: string }, body: Record<string, unknown>) {
   const jobId = body.jobId;
   if (!isUuid(jobId)) return respond(400, { error: "任务编号无效" });
+  if (await maintenanceEnabled(admin)) {
+    return respond(503, { error: "极汪正在维护，暂不接受重新生成；本次未开始生成，也未扣费。", code: "maintenance", maintenance: true });
+  }
+  await sweepStaleGenerations(admin);
   const { data: job, error } = await admin.from("generation_jobs").select("*").eq("id", jobId).maybeSingle();
   if (error || !job || job.user_id !== user.id) return respond(404, { error: "任务不存在" });
   if (job.status !== "failed") return respond(409, { error: "只有失败的任务可以重新生成", jobId });

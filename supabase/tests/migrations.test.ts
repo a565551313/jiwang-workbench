@@ -1,6 +1,6 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createTestDatabase, migrationFiles } from './helpers/database'
+import { applyMigrations, createTestDatabase, migrationFiles } from './helpers/database'
 
 const SETUP_TIMEOUT = 120_000
 let db: PGlite
@@ -56,5 +56,31 @@ describe('数据库迁移链', () => {
       "select count(*)::int as n from pg_proc join pg_namespace n on n.oid = pronamespace where n.nspname = 'public' and proname = 'worker_get_image_provider_api_key' and pronargs = 1",
     )
     expect(legacyKeyReaders.rows[0]?.n).toBe(0)
+  })
+
+  it('升级旧库时 queued_at 沿用任务创建时间，不重置参考图保留期限', async () => {
+    const upgradeDb = await createTestDatabase({ throughFile: '20261008103000_provider_model_settings.sql' })
+    try {
+      const userId = '11111111-1111-4111-8111-111111111111'
+      const createdAt = '2025-01-02T03:04:05.000Z'
+      await upgradeDb.query('insert into auth.users (id, email) values ($1, $2)', [userId, 'migration-test@example.invalid'])
+      await upgradeDb.query(
+        'insert into public.generation_jobs (user_id, status, created_at) values ($1, $2, $3)',
+        [userId, 'failed', createdAt],
+      )
+
+      await applyMigrations(upgradeDb, [
+        '20261008120000_generation_recovery.sql',
+        '20261008130000_retention_and_quotas.sql',
+      ])
+
+      const { rows } = await upgradeDb.query<{ created_at: string; queued_at: string }>(
+        'select created_at, queued_at from public.generation_jobs where user_id = $1', [userId],
+      )
+      expect(new Date(rows[0]!.queued_at).toISOString()).toBe(new Date(rows[0]!.created_at).toISOString())
+      expect(new Date(rows[0]!.queued_at).toISOString()).toBe(createdAt)
+    } finally {
+      await upgradeDb.close()
+    }
   })
 })
